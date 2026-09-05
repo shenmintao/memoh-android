@@ -36,6 +36,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import icu.minq.memoh.data.AppState
+import icu.minq.memoh.data.PendingOperation
+import icu.minq.memoh.data.PendingPhase
 import icu.minq.memoh.data.Screen
 import icu.minq.memoh.data.UiState
 import icu.minq.memoh.data.reconciledHistory
@@ -57,13 +59,15 @@ fun MemohApp(app: AppState, startVisibleSend: (() -> Unit) -> Unit) {
     val state by app.state.collectAsStateWithLifecycle()
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val windowWidth = classifyWindowWidth(maxWidth.value)
-        Scaffold(snackbarHost = { SnackbarHost(remember { SnackbarHostState() }) }) { padding ->
+        Scaffold(snackbarHost = { SnackbarHost(remember { SnackbarHostState() }) }, bottomBar = {
+            if (state.screen != Screen.Login) PendingBanner(state.pending, app::openPending, app::resumePending, app::acknowledgeUnknown)
+        }) { padding ->
             Box(Modifier.padding(padding).fillMaxSize()) {
                 when (state.screen) {
                     Screen.Login -> LoginScreen(state, windowWidth, app::login)
                     Screen.Bots -> BotScreen(state, windowWidth, app::selectBot, app::refreshBots, app::logout)
                     Screen.Sessions -> SessionScreen(state, windowWidth, app::openSession, app::createSession, app::refreshSessions, app::back, app::logout)
-                    Screen.Chat -> ChatScreen(state, windowWidth, { text -> startVisibleSend { app.send(text) } }, app::stop, app::decide, app::back, app::logout)
+                    Screen.Chat -> ChatScreen(state, windowWidth, app::editDraft, { text -> startVisibleSend { app.send(text) } }, app::stop, app::decide, app::back, app::logout)
                 }
                 if (state.loading) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .12f)).clickable { }, contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                 state.error?.let { ErrorBanner(it, app::clearError, Modifier.align(Alignment.BottomCenter).widthIn(max = 720.dp)) }
@@ -72,13 +76,36 @@ fun MemohApp(app: AppState, startVisibleSend: (() -> Unit) -> Unit) {
     }
 }
 
+@Composable private fun PendingBanner(pending: PendingOperation?, open: () -> Unit, resume: () -> Unit, acknowledge: (String) -> Unit) {
+    var dismissId by remember { mutableStateOf<String?>(null) }
+    if (pending != null && (pending.phase == PendingPhase.UNKNOWN || pending.terminal)) {
+        Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Text(if (pending.terminal) "上次任务状态已更新，请查看会话" else "上次消息的执行结果尚未确认。监听暂停不代表任务失败，不会自动重发。", style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(open) { Text("查看") }
+                    if (pending.phase == PendingPhase.UNKNOWN) TextButton(resume) { Text("继续监听") }
+                    TextButton({ dismissId = pending.invocationId }) { Text("解除等待") }
+                }
+            }
+        }
+    }
+    dismissId?.let { id -> AlertDialog(onDismissRequest = { dismissId = null }, title = { Text("解除本地等待？") },
+        text = { Text("这不会停止远程任务。请先确认原会话结果，避免重复执行。解除后可以发送新消息。") },
+        confirmButton = { TextButton({ acknowledge(id); dismissId = null }) { Text("已核对，解除") } },
+        dismissButton = { TextButton({ dismissId = null }) { Text("取消") } }) }
+}
+
 @Composable private fun LoginScreen(state: UiState, windowWidth: AppWindowWidthClass, login: (String, String, String) -> Unit) {
     var server by rememberSaveable { mutableStateOf("") }
     var username by rememberSaveable { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    Box(Modifier.fillMaxSize().imePadding().padding(if (windowWidth == AppWindowWidthClass.Compact) 28.dp else 40.dp), contentAlignment = Alignment.Center) {
-        if (windowWidth == AppWindowWidthClass.Expanded) {
-            Row(Modifier.widthIn(max = 1080.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(64.dp), verticalAlignment = Alignment.CenterVertically) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // Decide from the window, not the IME-reduced form height: branch changes destroy input focus.
+        val showBrand = windowWidth == AppWindowWidthClass.Expanded && maxHeight >= 560.dp
+        Box(Modifier.fillMaxSize().imePadding(), contentAlignment = Alignment.Center) {
+        if (showBrand) {
+            Row(Modifier.widthIn(max = 1160.dp).fillMaxWidth().padding(28.dp), horizontalArrangement = Arrangement.spacedBy(40.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(.9f)) {
                     Icon(Icons.Default.Forum, null, Modifier.size(76.dp), tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.height(22.dp))
@@ -86,10 +113,11 @@ fun MemohApp(app: AppState, startVisibleSend: (() -> Unit) -> Unit) {
                     Spacer(Modifier.height(10.dp))
                     Text("在平板上连接你的 Memoh Server，继续机器人会话与流式任务。", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                ElevatedCard(Modifier.weight(1f)) { LoginForm(state, server, { server = it }, username, { username = it }, password, { password = it }, login, Modifier.padding(28.dp)) }
+                ElevatedCard(Modifier.weight(1f)) { LoginForm(state, server, { server = it }, username, { username = it }, password, { password = it }, login, Modifier.verticalScroll(rememberScrollState()).padding(28.dp)) }
             }
         } else {
-            LoginForm(state, server, { server = it }, username, { username = it }, password, { password = it }, login, Modifier.widthIn(max = 520.dp).fillMaxWidth().verticalScroll(rememberScrollState()))
+            LoginForm(state, server, { server = it }, username, { username = it }, password, { password = it }, login, Modifier.widthIn(max = 576.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 16.dp))
+        }
         }
     }
 }
@@ -169,7 +197,7 @@ fun MemohApp(app: AppState, startVisibleSend: (() -> Unit) -> Unit) {
     var selected by remember(workdirs) { mutableStateOf(workdirs.singleOrNull()?.id) }
     val selectedName = workdirs.firstOrNull { it.id == selected }?.let { "${it.name}  ${it.path}" } ?: "不绑定工作目录"
     AlertDialog(onDismissRequest = dismiss, title = { Text("新建会话") }, text = {
-        Column {
+        Column(Modifier.verticalScroll(rememberScrollState())) {
             OutlinedTextField(title, { title = it }, label = { Text("标题（可选）") }, singleLine = true)
             Spacer(Modifier.height(12.dp)); Text("工作目录", style = MaterialTheme.typography.labelLarge)
             Box { OutlinedButton({ expanded = true }, Modifier.fillMaxWidth(), enabled = workdirsAvailable) { Text(selectedName, maxLines = 1) }
@@ -185,24 +213,24 @@ fun MemohApp(app: AppState, startVisibleSend: (() -> Unit) -> Unit) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun ChatScreen(state: UiState, windowWidth: AppWindowWidthClass, send: (String) -> Unit, stop: () -> Unit, decide: (String, Boolean, String?) -> Unit, back: () -> Unit, logout: () -> Unit) {
-    var draft by remember(state.session?.id) { mutableStateOf("") }
+@Composable private fun ChatScreen(state: UiState, windowWidth: AppWindowWidthClass, editDraft: (String) -> Unit, send: (String) -> Unit, stop: () -> Unit, decide: (String, Boolean, String?) -> Unit, back: () -> Unit, logout: () -> Unit) {
+    val draft = state.draft
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val live = state.runtime.run
     val settled = remember(state.history, live?.turn_id, live?.request_user_turn) { reconciledHistory(state.history, live) }
     val readOnly = state.session.isExternalChannel()
     val running = live != null && !live.isTerminal()
-    val canSend = !readOnly && state.connected && state.connectionFailure == null && !running && state.pendingInvocationId == null
+    val canSend = !readOnly && state.connected && state.connectionFailure == null && !running && state.pending?.blocksSend != true && !state.sendInFlight
     val allCount = settled.size + if (live != null) 1 else 0
     LaunchedEffect(allCount, live?.messages) { if (allCount > 0) list.animateScrollToItem(allCount - 1) }
     val contentMaxWidth = if (windowWidth == AppWindowWidthClass.Compact) 600.dp else 1040.dp
     Scaffold(topBar = { TopAppBar(title = { Column { Text(state.session?.title?.ifBlank { "新会话" } ?: "聊天"); Text(when { readOnly -> "外部渠道 · 只读"; state.connected -> "实时连接"; state.connectionFailure != null -> "连接不可用"; else -> "正在重连" }, style = MaterialTheme.typography.labelSmall, color = if (state.connected && !readOnly) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) } }, navigationIcon = { IconButton(back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }, actions = { IconButton(logout) { Icon(Icons.AutoMirrored.Filled.Logout, "退出") } }) }, bottomBar = {
         Surface(shadowElevation = 8.dp) { Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { Row(Modifier.widthIn(max = contentMaxWidth).fillMaxWidth().navigationBarsPadding().padding(horizontal = if (windowWidth == AppWindowWidthClass.Compact) 8.dp else 20.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
-            OutlinedTextField(draft, { draft = it }, Modifier.weight(1f), placeholder = { Text(if (readOnly) "外部渠道会话仅供查看" else "发送消息") }, enabled = !readOnly, readOnly = readOnly, maxLines = 5)
+            OutlinedTextField(draft, editDraft, Modifier.weight(1f), placeholder = { Text(if (readOnly) "外部渠道会话仅供查看" else "发送消息") }, enabled = !readOnly, readOnly = readOnly, maxLines = 5)
             Spacer(Modifier.width(8.dp))
             if (running && !readOnly) IconButton(stop, enabled = state.connected) { Icon(Icons.Default.StopCircle, "停止生成", tint = MaterialTheme.colorScheme.error) }
-            if (!readOnly) FilledIconButton({ val text = draft; if (text.isNotBlank()) { draft = ""; send(text); scope.launch { if (allCount > 0) list.animateScrollToItem(allCount - 1) } } }, enabled = draft.isNotBlank() && canSend) { Icon(Icons.AutoMirrored.Filled.Send, "发送") }
+            if (!readOnly) FilledIconButton({ val text = draft; if (text.isNotBlank()) { send(text); scope.launch { if (allCount > 0) list.animateScrollToItem(allCount - 1) } } }, enabled = draft.isNotBlank() && canSend) { Icon(Icons.AutoMirrored.Filled.Send, "发送") }
         } } }
     }) { padding ->
         Box(Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.TopCenter) {

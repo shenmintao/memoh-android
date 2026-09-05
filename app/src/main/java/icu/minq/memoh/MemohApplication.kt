@@ -4,6 +4,7 @@ import android.app.Application
 import icu.minq.memoh.data.PendingOperationStore
 import icu.minq.memoh.network.MemohApi
 import icu.minq.memoh.security.TokenStore
+import icu.minq.memoh.security.AuthStore
 import kotlinx.serialization.json.Json
 
 class MemohApplication : Application() {
@@ -17,4 +18,4 @@ class MemohApplication : Application() {
     }
 }
 
-data class AppContainer(val api: MemohApi, val tokenStore: TokenStore, val pendingStore: PendingOperationStore)
+data class AppContainer(val api: MemohApi, val tokenStore: AuthStore, val pendingStore: PendingOperationStore)

@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
-@Serializable data class AuthMaterial(val accessToken: String, val expiresAt: String, val apiBase: String)
+@Serializable data class AuthMaterial(val accessToken: String, val expiresAt: String, val apiBase: String, val accountId: String = "")
 @Serializable data class LoginRequest(val username: String, val password: String)
 @Serializable data class LoginResponse(@SerialName("access_token") val accessToken: String, @SerialName("expires_at") val expiresAt: String)
 @Serializable data class RefreshResponse(@SerialName("access_token") val accessToken: String, @SerialName("expires_at") val expiresAt: String)

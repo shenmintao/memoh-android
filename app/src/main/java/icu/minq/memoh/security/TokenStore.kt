@@ -17,7 +17,7 @@ class TokenStore(context: Context, private val json: Json) : AuthStore {
     private val alias = "memoh.auth.aes.v1"
     private val aad = "icu.minq.memoh:auth:v1".toByteArray()
 
-    override fun read(): AuthMaterial? = try {
+    @Synchronized override fun read(): AuthMaterial? = try {
         val iv = prefs.getString("iv", null) ?: return null
         val data = prefs.getString("data", null) ?: return null
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -28,7 +28,7 @@ class TokenStore(context: Context, private val json: Json) : AuthStore {
         clear(); null
     }
 
-    override fun write(value: AuthMaterial) {
+    @Synchronized override fun write(value: AuthMaterial) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
         cipher.updateAAD(aad)
@@ -37,7 +37,7 @@ class TokenStore(context: Context, private val json: Json) : AuthStore {
             .putString("data", Base64.encodeToString(encrypted, Base64.NO_WRAP)).apply()
     }
 
-    override fun clear() {
+    @Synchronized override fun clear() {
         prefs.edit().clear().apply()
         runCatching { keyStore().deleteEntry(alias) }
     }
