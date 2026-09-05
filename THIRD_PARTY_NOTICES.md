@@ -6,7 +6,7 @@ https://github.com/memohai/Memoh/blob/67fe0e6/apps/web/src/assets/logo.svg
 Reference commit: `67fe0e6` (retrieved 2026-09-05). UI submodule reference: `8cd8237aa13a1a6f50f0abbe029d90729a279695`.
 
 The original SVG path data and brand colors are preserved in `ic_memoh.xml`.
-Launcher artwork adds safe-zone scaling; the Android notification icon uses the same paths as a monochrome silhouette.
+Launcher artwork adds safe-zone scaling; the Android notification icon uses the same paths as a monochrome silhouette. Legacy density PNGs are rendered from those paths with resvg-py 0.2.6 by tools/generate_launcher_icons.py; the renderer is a development tool and is not bundled in the app.
 The upstream license is included at `licenses/Memoh-AGPL-3.0.txt`.
 
 Native Compose layout references:

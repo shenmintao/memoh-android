@@ -1,4 +1,17 @@
-# v0.2.2 验证记录
+# v0.2.3 验证记录
+
+2026-09-05；通知只保留左侧身份图标，顶部状态栏使用 Memoh 轮廓。
+
+- Release 构建、R8／资源收缩和发布签名校验通过，沿用旧证书；模拟器从 0.2.2 / 6 覆盖安装 0.2.3 / 7，并对最终 APK 再次覆盖安装及冷启动成功。Lint Debug／Release 均 0 errors、27 warnings（22 条既有建议及 5 条兼容 PNG 图标外形建议）。
+- 单元回归 50 项通过；本轮按通知范围执行设备专项，上一版 21 项全套回归保留在历史记录。
+
+- 通知专项 `PendingServiceTest`：API 36.1 / Android 16 模拟器 2 项通过，0 失败／跳过。实际 NotificationManager 收到的等待、失败结果、超时结果和锁屏 publicVersion 均不含 largeIcon，smallIcon 指向新的 `ic_stat_memoh`，通知色为品牌紫色；通用文案、隐私可见性、过期监听与旧启动回归通过。
+- 状态栏图标 alpha 轮廓与官方彩色 Memoh 矢量逐像素比较，差异低于 1%；系统 PackageManager 返回的应用图标保留官方两种紫色。五档密度 PNG 从现有官方矢量生成，作为非自适应图标读取方式的兼容资源。
+- 核对实际通知中心截图：左侧显示彩色 Memoh 应用图标，右侧无第二个 logo。等待通知为低重要性，模拟器在该配置下不在顶部显示静默通知图标；不把图标资源核对表述为强制覆盖系统的静默图标设置。
+- 本次测试使用本机模拟 API，不向真实 Agent 发送请求。截图中的错误状态为测试样例。用户尚未提供真机品牌／系统版本，未声称已在其系统上完成实机验证；图标缓存是否刷新需要在该设备覆盖升级后观察。
+- 系统模板依据：[Android 通知设计](https://developer.android.com/design/ui/mobile/guides/home-screen/notifications)（状态栏单色图标、可选 large icon、厂商模板差异）；[小米通知 SDK 文档](https://dev.mi.com/xiaomihyperos/documentation/detail?pId=1544)与[华为通知设计](https://developer.huawei.com/consumer/cn/doc/doccenter-ux-design/system-features-notification-0000001793074217)说明系统可从应用图标取得通知身份标识。未加入厂商私有反射接口。
+
+# v0.2.2 验证记录（上一版）
 
 2026-09-05；模型浮层、UUID 隐藏和实际思考强度参数。
 

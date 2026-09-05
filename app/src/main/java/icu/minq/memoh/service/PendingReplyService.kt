@@ -8,8 +8,6 @@ import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
-import androidx.core.content.ContextCompat
-import androidx.core.graphics.drawable.toBitmap
 import icu.minq.memoh.MainActivity
 import icu.minq.memoh.MemohApplication
 import icu.minq.memoh.R
@@ -31,10 +29,6 @@ class PendingReplyService : Service() {
     private var disconnectedAt: Long? = null
     private val notifiedDecisions = mutableSetOf<String>()
     private val container get() = (application as MemohApplication).container
-    private val notificationLogo by lazy {
-        val size = (64 * resources.displayMetrics.density).toInt().coerceAtLeast(1)
-        requireNotNull(ContextCompat.getDrawable(this, R.drawable.ic_memoh)).toBitmap(size, size)
-    }
 
     override fun onCreate() { super.onCreate(); createChannels() }
     override fun onBind(intent: Intent?): IBinder? = null
@@ -145,9 +139,10 @@ class PendingReplyService : Service() {
         super.onDestroy()
     }
 
+    // The system owns the left-hand identity icon. A largeIcon creates a second image on the right.
     private fun notificationBuilder(channel: String) = NotificationCompat.Builder(this, channel)
-        .setSmallIcon(R.drawable.ic_notification)
-        .setLargeIcon(notificationLogo)
+        .setSmallIcon(R.drawable.ic_stat_memoh)
+        .setColor(0xff7948ff.toInt())
         .setContentTitle("Memoh")
 
     private fun ongoingNotification(operation: ActiveOperation): Notification = notificationBuilder(CHANNEL_PENDING)

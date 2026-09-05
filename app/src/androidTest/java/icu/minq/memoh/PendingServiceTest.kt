@@ -82,14 +82,25 @@ class PendingServiceTest {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun assertBranding(context: Context, notification: Notification) {
-        assertEquals(R.drawable.ic_notification, notification.smallIcon.resId)
-        assertNotNull("Notification card must include the color logo", notification.getLargeIcon())
-        val bitmap = notification.getLargeIcon().loadDrawable(context)!!.toBitmap(128, 128)
+        assertEquals(R.drawable.ic_stat_memoh, notification.smallIcon.resId)
+        assertEquals(0xff7948ff.toInt(), notification.color)
+        assertNull("The right-hand duplicate logo must be absent", notification.getLargeIcon())
+        assertNull(notification.extras.get(Notification.EXTRA_LARGE_ICON))
+        assertEquals(R.mipmap.ic_memoh_launcher, context.applicationInfo.icon)
+        // OEM notification centers read the application icon for their left-hand identity icon.
+        val bitmap = context.packageManager.getApplicationIcon(context.packageName).toBitmap(128, 128)
         val pixels = IntArray(bitmap.width * bitmap.height)
         bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
         assertTrue("Logo must retain its light purple", pixels.count { it == 0xffbd69ff.toInt() } > 20)
         assertTrue("Logo must retain its dark purple", pixels.count { it == 0xff7948ff.toInt() } > 20)
+        val small = notification.smallIcon.loadDrawable(context)!!.toBitmap(128, 128)
+        val official = ContextCompat.getDrawable(context, R.drawable.ic_memoh)!!.toBitmap(128, 128)
+        val mask = IntArray(128 * 128); val reference = IntArray(128 * 128)
+        small.getPixels(mask, 0, 128, 0, 0, 128, 128)
+        official.getPixels(reference, 0, 128, 0, 0, 128, 128)
+        assertTrue("Status-bar icon must retain the official Memoh silhouette", mask.indices.count { (mask[it] ushr 24) != (reference[it] ushr 24) } < mask.size / 100)
     }
 
     private suspend fun captureNotification(name: String) {
@@ -99,13 +110,18 @@ class PendingServiceTest {
         try {
             // Foreground-service cards can be deferred by System UI; capture after that window.
             if (name.endsWith("waiting")) delay(10_000)
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val dir = arguments.getString("additionalTestOutputDir")?.let(::File) ?: context.getExternalFilesDir("qa")!!
+            dir.mkdirs()
+            if (name.endsWith("waiting")) {
+                val statusBar = requireNotNull(automation.takeScreenshot())
+                File(dir, "statusbar-waiting.png").outputStream().use { statusBar.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                statusBar.recycle()
+            }
             automation.executeShellCommand("cmd statusbar expand-notifications").use { descriptor ->
                 java.io.FileInputStream(descriptor.fileDescriptor).readBytes()
             }
             delay(5_000)
-            val context = ApplicationProvider.getApplicationContext<Context>()
-            val dir = arguments.getString("additionalTestOutputDir")?.let(::File) ?: context.getExternalFilesDir("qa")!!
-            dir.mkdirs()
             val screenshot = requireNotNull(automation.takeScreenshot())
             File(dir, "$name.png").outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
             screenshot.recycle()
