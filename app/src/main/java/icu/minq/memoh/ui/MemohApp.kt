@@ -44,6 +44,7 @@ internal data class UiActions(
     val chooseFiles: () -> Unit = {}, val removeAttachment: (String) -> Unit = {}, val retryAttachment: (String) -> Unit = {},
     val refreshModels: () -> Unit = {}, val selectModel: (String) -> Unit = {},
     val refreshDevices: () -> Unit = {}, val selectDevice: (String) -> Unit = {},
+    val selectReasoning: (String) -> Unit = {},
 )
 
 @Composable fun MemohApp(app: AppState, startVisibleSend: (() -> Unit) -> Unit) {
@@ -54,7 +55,7 @@ internal data class UiActions(
         app::stop, app::decide, app::showBots, app::logout, app::clearError, app::openPending, app::resumePending, app::acknowledgeUnknown, app::forgetLogin,
         chooseFiles = { if (app.beginFileSelection()) runCatching { files.launch(arrayOf("*/*")) }.onFailure { app.filePickerUnavailable() } },
         removeAttachment = app::removeAttachment, retryAttachment = app::retryAttachment,
-        refreshModels = app::refreshModels, selectModel = app::selectModel, refreshDevices = app::refreshDevices, selectDevice = app::selectDevice))
+        refreshModels = app::refreshModels, selectModel = app::selectModel, refreshDevices = app::refreshDevices, selectDevice = app::selectDevice, selectReasoning = app::selectReasoning))
 }
 
 private class OpenChatDocuments : ActivityResultContracts.OpenMultipleDocuments() {

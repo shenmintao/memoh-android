@@ -71,10 +71,11 @@ class ChatSocketLifecycleTest {
             try {
                 socket.connect(); socket.connect() // Duplicate connect is coalesced.
                 assertTrue(firstConnected.await(5, TimeUnit.SECONDS))
-                socket.sendMessage("", "i", listOf(ChatAttachment(name = "notes.txt", mime = "text/plain", base64 = "data:text/plain;base64,aGVsbG8=")), "model-picked", "remote:computer")
+                socket.sendMessage("", "i", listOf(ChatAttachment(name = "notes.txt", mime = "text/plain", base64 = "data:text/plain;base64,aGVsbG8=")), "model-picked", "remote:computer", "high")
                 assertTrue(delivered.await(5, TimeUnit.SECONDS))
                 assertEquals("model-picked", payload.get()["model_id"]!!.jsonPrimitive.content)
                 assertEquals("remote:computer", payload.get()["workspace_target_id"]!!.jsonPrimitive.content)
+                assertEquals("high", payload.get()["reasoning_effort"]!!.jsonPrimitive.content)
                 assertEquals("", payload.get()["text"]!!.jsonPrimitive.content)
                 val attachment = payload.get()["attachments"]!!.jsonArray.single().jsonObject
                 assertEquals("file", attachment["type"]!!.jsonPrimitive.content)

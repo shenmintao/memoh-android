@@ -98,7 +98,7 @@ class ComposerLifecycleTest {
                 resolver.openOutputStream(uri)!!.use { it.write("attachment fixture".toByteArray()) }
                 open(app, Session("s1", "b"))
                 withContext(Dispatchers.Main) {
-                    app.selectModel("m2"); app.selectDevice("remote:online")
+                    app.selectModel("m2"); app.selectReasoning("high"); app.selectDevice("remote:online")
                     app.selectDevice("remote:offline")
                     assertTrue(app.beginFileSelection()); app.attachFiles(listOf(uri))
                 }
@@ -107,6 +107,7 @@ class ComposerLifecycleTest {
                 open(app, Session("s2", "b"))
                 assertTrue(app.state.value.attachments.isEmpty())
                 assertEquals("", app.state.value.composer.modelId)
+                assertEquals("", app.state.value.composer.effectiveReasoning())
                 assertEquals("native", app.state.value.composer.targetId)
                 withContext(Dispatchers.Main) { assertTrue(app.beginFileSelection()) }
                 open(app, Session("s3", "b"))
@@ -115,6 +116,7 @@ class ComposerLifecycleTest {
                 open(app, Session("s1", "b"))
                 assertNotNull(app.state.value.attachments.single().payload)
                 assertEquals("m2", app.state.value.composer.modelId)
+                assertEquals("high", app.state.value.composer.effectiveReasoning())
                 assertEquals("remote:online", app.state.value.composer.targetId)
                 withContext(Dispatchers.Main) { app.logout() }
                 assertTrue(app.state.value.attachments.isEmpty())
@@ -145,6 +147,22 @@ class ComposerLifecycleTest {
         withTimeout(8_000) { app.state.first { it.session?.id == session.id && !it.loading && !it.composer.modelsLoading && !it.composer.targetsLoading } }
     }
 
+    @Test fun ACPReasoningRequiresConfirmationAndRefreshesAfterFailure() = runBlocking {
+        withApp { _, app, failPatch ->
+            open(app, Session("s", "b", runtimeType = "acp_agent"))
+            assertEquals("medium", app.state.value.composer.effectiveReasoning())
+            withContext(Dispatchers.Main) { app.selectReasoning("high") }
+            withTimeout(5_000) { app.state.first { it.composer.modelUncertain && !it.composer.modelChanging } }
+            assertEquals("medium", app.state.value.composer.effectiveReasoning())
+            withContext(Dispatchers.Main) { app.refreshModels() }
+            withTimeout(5_000) { app.state.first { !it.composer.modelsLoading && !it.composer.modelUncertain } }
+            failPatch.set(false)
+            withContext(Dispatchers.Main) { app.selectReasoning("high") }
+            withTimeout(5_000) { app.state.first { it.composer.effectiveReasoning() == "high" && !it.composer.modelChanging } }
+            assertNull(app.state.value.composer.modelsError)
+        }
+    }
+
     private suspend fun withApp(test: suspend (MemohApplication, AppState, AtomicBoolean) -> Unit) {
         val application = ApplicationProvider.getApplicationContext<MemohApplication>()
         val failPatch = AtomicBoolean(true)
@@ -157,9 +175,9 @@ class ComposerLifecycleTest {
                 path.endsWith("/bots") -> """{"items":[{"id":"b","name":"Memoh","current_user_permissions":["manage"]}]}"""
                 path.endsWith("/settings") -> """{"chat_model_id":"m1"}"""
                 path.endsWith("/sessions/s") -> """{"id":"s","bot_id":"b"}"""
-                path.endsWith("/models") -> """[{"id":"m1","name":"模型一","type":"chat"},{"id":"m2","name":"模型二","type":"chat"}]"""
+                path.endsWith("/models") -> """[{"id":"m1","name":"模型一","type":"chat"},{"id":"m2","name":"模型二","type":"chat","reasoning":{"supported":true,"efforts":["medium","high"],"default_effort":"medium"}}]"""
                 path.endsWith("/workspace-targets") -> """{"targets":[{"target_id":"native","kind":"native","primary":true},{"target_id":"remote:online","kind":"remote","name":"办公电脑","online":true,"status":"online"},{"target_id":"remote:offline","kind":"remote","online":false}]}"""
-                path.endsWith("/acp-runtime") || path.endsWith("/acp-runtime/model") -> """{"runtime_id":"r","models":{"supported":true,"current_model_id":"${if (isPatch) "m2" else "m1"}","available_models":[{"id":"m1","name":"模型一"},{"id":"m2","name":"模型二"}]}}"""
+                path.endsWith("/acp-runtime") || path.contains("/acp-runtime/") -> """{"runtime_id":"r","models":{"supported":true,"current_model_id":"${if (path.endsWith("/model")) "m2" else "m1"}","available_models":[{"id":"m1","name":"模型一"},{"id":"m2","name":"模型二"}]},"reasoning":{"supported":true,"current_effort":"${if (path.endsWith("/reasoning")) "high" else "medium"}","available_efforts":[{"id":"medium"},{"id":"high"}]}}"""
                 else -> """{"items":[]}"""
             }
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(code).message("fixture")

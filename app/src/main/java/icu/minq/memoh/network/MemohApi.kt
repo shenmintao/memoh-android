@@ -65,9 +65,12 @@ class MemohApi(val client: OkHttpClient, val json: Json, private val tokenStore:
     suspend fun workspaceTargets(botId: String): List<WorkspaceTarget> = get("bots/$botId/workspace-targets", WorkspaceTargets.serializer()).targets.filter { it.targetId.isNotBlank() && it.kind.isNotBlank() }
     suspend fun models(): List<ChatModel> = get("models", ListSerializer(ChatModel.serializer())).filter { it.id.isNotBlank() && it.type == "chat" && it.enable }
     suspend fun agentModels(botId: String, agentId: String): ExternalModels = get("bots/$botId/agents/$agentId/models", ExternalModels.serializer())
+    suspend fun providers(): List<ModelProvider> = get("providers", ListSerializer(ModelProvider.serializer()))
     suspend fun ensureACPRuntime(botId: String, sessionId: String): ACPRuntime = json.decodeFromString(ACPRuntime.serializer(), authenticated("bots/$botId/sessions/$sessionId/acp-runtime", "POST", null))
     suspend fun setACPModel(botId: String, sessionId: String, modelId: String): ACPRuntime = json.decodeFromString(ACPRuntime.serializer(), authenticated(
         "bots/$botId/sessions/$sessionId/acp-runtime/model", "PATCH", json.encodeToString(ModelSelection.serializer(), ModelSelection(modelId)).toRequestBody(media)))
+    suspend fun setACPReasoning(botId: String, sessionId: String, effort: String): ACPRuntime = json.decodeFromString(ACPRuntime.serializer(), authenticated(
+        "bots/$botId/sessions/$sessionId/acp-runtime/reasoning", "PATCH", json.encodeToString(ReasoningSelection.serializer(), ReasoningSelection(effort)).toRequestBody(media)))
 
     suspend fun createSession(botId: String, title: String, workdirId: String?, settings: BotSettings): Session {
         val runtime = settings.chatRuntime.trim().ifEmpty { "model" }

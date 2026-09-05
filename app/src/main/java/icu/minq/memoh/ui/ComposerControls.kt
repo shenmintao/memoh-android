@@ -59,35 +59,6 @@ internal fun fileSizeLabel(bytes: Long): String = when {
     }
 }
 
-@Composable internal fun ModelPicker(state: UiState, actions: UiActions, dismiss: () -> Unit) {
-    var search by remember { mutableStateOf("") }
-    val config = state.composer
-    val isACP = state.session?.let { it.runtimeType == "acp_agent" || it.type == "acp_agent" } == true
-    val locked = state.loading || state.sendInFlight || config.modelChanging || config.modelsLoading || state.pending?.blocksSend == true || state.runtime.run?.let { !it.isTerminal() } == true || state.session.isExternalChannel()
-    AlertDialog(onDismissRequest = dismiss, modifier = Modifier.imePadding(), properties = DialogProperties(decorFitsSystemWindows = false), title = { Text("选择模型") }, text = {
-        val focus = LocalFocusManager.current
-        val keyboard = LocalSoftwareKeyboardController.current
-        val select: (String) -> Unit = { id -> focus.clearFocus(); keyboard?.hide(); actions.selectModel(id) }
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(search, { search = it }, singleLine = true, label = { Text("搜索模型") }, modifier = Modifier.fillMaxWidth())
-            if (config.modelsLoading || config.modelChanging) LinearProgressIndicator(Modifier.fillMaxWidth())
-            config.modelsError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
-            LazyColumn(Modifier.weight(1f, fill = false).heightIn(max = 340.dp).testTag("model-options")) {
-                if (!isACP && search.isBlank()) item {
-                    PickerRow("跟随默认模型", config.defaultModelId, config.modelId.isBlank(), !locked) { select("") }
-                }
-                items(config.models.filter { search.isBlank() || it.label().contains(search, true) || it.id.contains(search, true) }, key = { it.id }) { model ->
-                    PickerRow(model.label(), model.id.takeUnless { it == model.label() }.orEmpty(), model.id == config.modelId, !locked) { select(model.id) }
-                }
-                if (config.models.isEmpty() && !config.modelsLoading) item { Text("暂无可选模型", Modifier.padding(vertical = 16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            }
-            if (config.modelChanging) Text("正在切换模型…", style = MaterialTheme.typography.bodySmall)
-        }
-    }, confirmButton = { TextButton(dismiss) { Text("完成") } }, dismissButton = {
-        TextButton(actions.refreshModels, enabled = !config.modelsLoading && !config.modelChanging) { Text("刷新") }
-    })
-}
-
 @Composable internal fun DevicePicker(state: UiState, actions: UiActions, dismiss: () -> Unit) {
     val config = state.composer
     val session = state.session

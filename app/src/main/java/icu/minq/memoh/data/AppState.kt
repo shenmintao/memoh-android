@@ -68,6 +68,7 @@ class AppState(application: Application, private val container: AppContainer, pr
     private data class PickerContext(val key: String, val auth: Long)
     private var pickerContext: PickerContext? = null
     private val modelSelections = mutableMapOf<String, String>()
+    private val reasoningSelections = mutableMapOf<String, String>()
     private val targetSelections = mutableMapOf<String, String>()
     private var modelsJob: Job? = null
     private var targetsJob: Job? = null
@@ -228,6 +229,9 @@ class AppState(application: Application, private val container: AppContainer, pr
             attachments = attachments.get(draftKey(bot.id, session.id)), composer = ComposerConfig(
                 modelId = modelSelections[draftKey(bot.id, session.id)] ?: if (session.type == "subagent") session.metadataString("model_uuid") else "",
                 defaultModelId = if (session.isAgentRuntime()) "" else mutable.value.settings.chatModelId.orEmpty(),
+                agentRuntime = session.isAgentRuntime(), acpRuntime = session.runtimeType == "acp_agent" || session.type == "acp_agent",
+                reasoningEffort = reasoningSelections[draftKey(bot.id, session.id)].orEmpty(),
+                configuredReasoningEffort = if (session.isAgentRuntime()) "" else mutable.value.settings.reasoningEffort.ifBlank { "medium" },
                 targetId = if (session.canSelectDevice()) targetSelections[draftKey(bot.id, session.id)] ?: session.workspaceTargetId() else ""))
         savedState[KEY_BOT] = bot.id; savedState[KEY_SESSION] = session.id
         lateinit var candidate: ChatSocket
@@ -359,9 +363,12 @@ class AppState(application: Application, private val container: AppContainer, pr
         updateComposer { it.copy(modelsLoading = true, modelsError = null) }
         modelsJob = viewModelScope.launch {
             try {
+                var acpRuntime: ACPRuntime? = null
+                var providers = emptyList<ModelProvider>()
                 val catalog = when {
                     session.runtimeType == "acp_agent" || session.type == "acp_agent" -> {
                         val runtime = container.api.ensureACPRuntime(bot.id, session.id)
+                        acpRuntime = runtime
                         ExternalModels(runtime.models?.availableModels.orEmpty(), runtime.models?.currentModelId.orEmpty())
                     }
                     session.runtimeType in setOf("codex", "claude-code") -> {
@@ -369,14 +376,23 @@ class AppState(application: Application, private val container: AppContainer, pr
                             ?: throw IllegalStateException("会话未指定 Agent，无法读取模型")
                         container.api.agentModels(bot.id, agent)
                     }
-                    else -> ExternalModels(container.api.models(), value.settings.chatModelId.orEmpty())
+                    else -> {
+                        val models = container.api.models()
+                        // Provider names are optional; lacking permission must not hide available models.
+                        providers = try { withTimeoutOrNull(5_000) { container.api.providers() }.orEmpty() }
+                            catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { emptyList() }
+                        ExternalModels(models, value.settings.chatModelId.orEmpty(), value.settings.reasoningEffort.ifBlank { "medium" })
+                    }
                 }
                 if (composerCurrent(key, auth) && version == modelVersion) {
                     val isACP = session.runtimeType == "acp_agent" || session.type == "acp_agent"
                     val choices = catalog.models.filter { it.id.isNotBlank() }.distinctBy { it.id }
                     updateComposer { it.copy(models = choices, modelUncertain = false,
+                        providers = providers, runtimeReasoning = acpRuntime?.reasoning,
+                        configuredReasoningEffort = catalog.configuredReasoningEffort,
                         modelId = if (isACP) catalog.configuredModelId else it.modelId,
-                        defaultModelId = catalog.configuredModelId.ifBlank { choices.firstOrNull { model -> model.default }?.id.orEmpty() }) }
+                        defaultModelId = catalog.configuredModelId.ifBlank { choices.firstOrNull { model -> model.default }?.id.orEmpty() }).reconciled() }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
@@ -395,7 +411,8 @@ class AppState(application: Application, private val container: AppContainer, pr
         if (configurationLocked() || value.composer.modelsLoading || (id.isNotBlank() && value.composer.models.none { it.id == id })) return
         if (session.runtimeType != "acp_agent" && session.type != "acp_agent") {
             modelSelections[key] = id
-            updateComposer { it.copy(modelId = id, modelsError = null) }
+            updateComposer { it.copy(modelId = id, modelsError = null).reconciled() }
+            reasoningSelections[key] = mutable.value.composer.reasoningEffort
             return
         }
         if (id.isBlank()) return
@@ -409,11 +426,41 @@ class AppState(application: Application, private val container: AppContainer, pr
                 if (runtime.models?.currentModelId != id) throw IllegalStateException("Agent 未确认模型切换，请刷新后重试")
                 if (composerCurrent(key, auth) && version == modelVersion) {
                     modelSelections[key] = id
-                    updateComposer { it.copy(modelId = id, models = runtime.models.availableModels) }
+                    updateComposer { it.withRuntime(runtime) }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
                 if (composerCurrent(key, auth) && version == modelVersion) updateComposer { it.copy(modelsError = "模型切换未确认，请刷新后重试", modelUncertain = true) }
+            } finally {
+                if (composerCurrent(key, auth) && version == modelVersion) updateComposer { it.copy(modelChanging = false) }
+            }
+        }
+    }
+
+    fun selectReasoning(effort: String) {
+        val value = mutable.value
+        val session = value.session ?: return
+        val bot = value.bot ?: return
+        val key = visibleDraftKey() ?: return
+        if (configurationLocked() || value.composer.modelsLoading || value.composer.modelUncertain || value.composer.reasoningOptions().none { it.id == effort }) return
+        if (!value.composer.acpRuntime) {
+            reasoningSelections[key] = effort
+            updateComposer { it.copy(reasoningEffort = effort) }
+            return
+        }
+        val auth = authGeneration
+        val version = ++modelVersion
+        modelsJob?.cancel()
+        updateComposer { it.copy(modelChanging = true, modelsError = null) }
+        modelsJob = viewModelScope.launch {
+            try {
+                val runtime = container.api.setACPReasoning(bot.id, session.id, effort)
+                if (runtime.reasoning?.currentEffort != effort || runtime.models?.currentModelId != value.composer.modelId)
+                    throw IllegalStateException("Agent 未确认思考强度切换")
+                if (composerCurrent(key, auth) && version == modelVersion) updateComposer { it.withRuntime(runtime) }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) {
+                if (composerCurrent(key, auth) && version == modelVersion) updateComposer { it.copy(modelsError = "思考强度切换未确认，请刷新后重试", modelUncertain = true) }
             } finally {
                 if (composerCurrent(key, auth) && version == modelVersion) updateComposer { it.copy(modelChanging = false) }
             }
@@ -498,7 +545,8 @@ class AppState(application: Application, private val container: AppContainer, pr
         val key = draftKey(bot.id, session.id)
         val submittedAttachments = value.attachments.map { it.id }.toSet()
         socket!!.sendMessage(text.trim(), pending.invocationId, value.attachments.mapNotNull { it.payload }, value.composer.modelId,
-            if (session.canSelectDevice()) value.composer.targetId else "") { queued ->
+            if (session.canSelectDevice()) value.composer.targetId else "",
+            if (value.composer.acpRuntime) "" else value.composer.effectiveReasoning()) { queued ->
             if (auth != authGeneration) return@sendMessage
             if (queued) { drafts.queued(key, text); attachments.queued(key, submittedAttachments) }
             else container.pendingStore.update(pending) { it.copy(phase = PendingPhase.FAILED) }
@@ -572,7 +620,7 @@ class AppState(application: Application, private val container: AppContainer, pr
         drafts.clear(); controls.clear(); accountKey = ""
         modelsJob?.cancel(); targetsJob?.cancel(); modelVersion++; targetVersion++
         attachmentJobs.values.toList().forEach { it.cancel() }; attachmentJobs.clear(); attachments.clear(); pickerContext = null
-        modelSelections.clear(); targetSelections.clear()
+        modelSelections.clear(); reasoningSelections.clear(); targetSelections.clear()
         savedState[KEY_BOT] = ""; savedState[KEY_SESSION] = ""
         mutable.value = UiState(error = error, rememberedLogin = container.loginStore?.read())
         bootstrapped = true

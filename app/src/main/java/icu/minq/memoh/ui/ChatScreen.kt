@@ -27,6 +27,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
@@ -41,6 +43,7 @@ import icu.minq.memoh.data.reconciledHistory
 import icu.minq.memoh.model.*
 import io.noties.markwon.Markwon
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @Composable internal fun ChatScreen(state: UiState, actions: UiActions) {
     key(state.session?.id) {
@@ -98,6 +101,7 @@ import kotlinx.coroutines.launch
     val canSend = !readOnly && state.connected && state.connectionFailure == null && !running && state.pending?.blocksSend != true && !state.sendInFlight && !state.loading && !state.composer.modelChanging && !state.composer.modelUncertain && state.attachments.all { it.payload != null }
     val dir = state.workdirs.firstOrNull { it.id == state.session?.workdirId }
     var models by remember { mutableStateOf(false) }
+    var modelAnchorTop by remember { mutableIntStateOf(0) }
     var devices by remember { mutableStateOf(false) }
     Column {
         Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceBright,
@@ -122,14 +126,16 @@ import kotlinx.coroutines.launch
                         Icon(if (state.session?.workdirId.isNullOrBlank()) Icons.Default.Computer else Icons.Default.FolderOpen,
                             "选择设备：${if (state.session?.workdirId.isNullOrBlank()) state.composer.targetLabel() else dir?.name ?: "已绑定工作目录"}", Modifier.size(20.dp))
                     }
-                    Surface(onClick = { models = true; actions.refreshModels() }, enabled = !readOnly, modifier = Modifier.weight(1f).semantics { contentDescription = "选择模型" }, shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) { Box(Modifier.onGloballyPositioned { modelAnchorTop = it.boundsInWindow().top.roundToInt() }) {
+                    Surface(onClick = { models = true; actions.refreshModels() }, enabled = !readOnly, modifier = Modifier.widthIn(max = 240.dp).semantics { contentDescription = "选择模型" }, shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
                         Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Icon(Icons.Default.AutoAwesome, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(state.composer.modelLabel(), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            Text(state.composer.composerLabel(), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                             if (state.composer.modelChanging || state.composer.modelsLoading) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
                             else Icon(Icons.Default.ExpandMore, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
+                    if (models) ModelPicker(state, actions, modelAnchorTop) { models = false }
+                    } }
                     Spacer(Modifier.width(8.dp))
                     if (running && !readOnly) FilledIconButton(actions.stop, enabled = state.connected && state.pendingControls.isEmpty(), modifier = Modifier.size(40.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.onSurface, contentColor = MaterialTheme.colorScheme.surface)) {
@@ -145,8 +151,8 @@ import kotlinx.coroutines.launch
         val hint = when {
             readOnly -> "在原渠道中回复此会话"
             state.sendInFlight -> if (state.attachments.isNotEmpty()) "正在提交消息和附件…" else "正在提交消息…"
-            state.composer.modelChanging -> "正在切换模型…"
-            state.composer.modelUncertain -> "模型切换未确认，请打开模型选择器刷新"
+            state.composer.modelChanging -> "正在更新模型设置…"
+            state.composer.modelUncertain -> "模型设置未确认，请打开模型选择器重试"
             state.attachments.any { it.preparing } -> "正在读取文件…"
             state.connectionFailure != null -> "连接不可用，请重新打开会话"
             !state.connected -> "正在连接服务器…"
@@ -156,7 +162,6 @@ import kotlinx.coroutines.launch
         }
         if (hint.isNotBlank()) Text(hint, Modifier.padding(start = 8.dp, top = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    if (models) ModelPicker(state, actions) { models = false }
     if (devices) DevicePicker(state, actions) { devices = false }
 }
 

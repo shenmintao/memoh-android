@@ -124,14 +124,14 @@ class MobileShellTest {
         compose.setContent { MemohTheme { MemohShell(state, UiActions(selectModel = { state = state.copy(composer = state.composer.copy(modelId = it)) },
             selectDevice = { state = state.copy(composer = state.composer.copy(targetId = it)) })) } }
         compose.onNodeWithContentDescription("选择模型").performClick()
-        compose.onNodeWithText("搜索模型").performTextInput("模型二")
+        compose.onNodeWithContentDescription("搜索模型").performTextInput("模型二")
         compose.onNodeWithTag("model-options").performScrollToNode(hasText("模型二"))
-        compose.onNodeWithText("完成").assertIsDisplayed()
+        compose.onNodeWithText("完成").assertDoesNotExist()
         screenshot("model-picker-search", dialog = true)
         compose.onNode(hasText("模型二") and !hasSetTextAction() and hasClickAction()).performClick()
         compose.runOnIdle { assertEquals("m2", state.composer.modelId) }
         screenshot("model-picker", dialog = true)
-        compose.onNodeWithText("完成").performClick()
+        androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
         compose.onNodeWithContentDescription("选择设备：服务器工作区").performClick()
         compose.onNodeWithText("离线电脑").assertIsNotEnabled()
         compose.onNodeWithText("办公电脑").performClick()
@@ -139,5 +139,39 @@ class MobileShellTest {
         screenshot("device-picker", dialog = true)
         compose.onNodeWithText("完成").performClick()
         compose.onNodeWithContentDescription("选择设备：办公电脑").assertIsDisplayed()
+    }
+
+    @Test fun modelPopoverGroupsProvidersHidesUUIDAndChangesReasoning() {
+        val uuid = "55e6dcc0-c6e8-4366-a91f-61600b217d1b"
+        val options = ReasoningOptions(true, false, listOf("low", "medium", "high"), "medium")
+        var state by mutableStateOf(chat().copy(history = emptyList(), runtime = RuntimeState("s"), composer = ComposerConfig(
+            models = listOf(ChatModel(uuid, "gpt-5.6-sol", providerId = "p", reasoning = options),
+                ChatModel("terra", "gpt-5.6-terra", providerId = "p", reasoning = options),
+                ChatModel("image", "gpt-image-2", providerId = "p"), ChatModel("luna", "gpt-5.6-luna", providerId = "p", reasoning = options)),
+            modelId = uuid, providers = listOf(ModelProvider("p", "OpenAI")), reasoningEffort = "medium")))
+        compose.setContent { MemohTheme { MemohShell(state, UiActions(selectModel = { state = state.copy(composer = state.composer.copy(modelId = it).reconciled()) },
+            selectReasoning = { state = state.copy(composer = state.composer.copy(reasoningEffort = it)) })) } }
+        compose.onNodeWithText("gpt-5.6-sol · 中").assertIsDisplayed()
+        compose.onNodeWithContentDescription("选择模型").performClick()
+        compose.onNodeWithText("OpenAI").assertIsDisplayed()
+        compose.onNodeWithText(uuid, substring = true).assertDoesNotExist()
+        screenshot("model-popover", dialog = true)
+        compose.onNodeWithContentDescription("思考强度：中").performClick()
+        compose.onNodeWithText("低").assertIsDisplayed()
+        compose.onNode(hasText("中") and isSelected()).assertIsDisplayed()
+        screenshot("model-reasoning", dialog = true)
+        compose.onNodeWithText("高").performClick()
+        compose.onNodeWithText("gpt-5.6-sol · 高").assertIsDisplayed()
+        compose.onNodeWithTag("model-options").performScrollToNode(hasText("gpt-image-2"))
+        compose.onNodeWithText("gpt-image-2").performClick()
+        compose.runOnIdle { assertEquals("", state.composer.effectiveReasoning()) }
+        compose.onNodeWithContentDescription("思考强度：默认").assertDoesNotExist()
+        compose.onNodeWithContentDescription("搜索模型").performTextInput("找不到")
+        compose.onNodeWithText("没有匹配的模型").assertIsDisplayed()
+        screenshot("model-no-results-keyboard", dialog = true)
+        compose.onNodeWithContentDescription("清除模型搜索").performClick()
+        compose.onNodeWithTag("model-options").performScrollToNode(hasText("gpt-5.6-terra"))
+        compose.onNodeWithText("gpt-5.6-terra").performClick()
+        compose.onNodeWithContentDescription("思考强度：中").assertIsDisplayed()
     }
 }

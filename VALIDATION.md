@@ -1,4 +1,18 @@
-# v0.2.1 验证记录
+# v0.2.2 验证记录
+
+2026-09-05；模型浮层、UUID 隐藏和实际思考强度参数。
+
+- `lintDebug` / `lintRelease`：各 0 errors、22 warnings，沿用依赖／target API／KTX 建议。Release R8 与资源收缩、v2 签名校验通过，沿用原 RSA 4096 发布证书。
+- API 36.1 模拟器从已安装的 0.2.1 / 5 直接覆盖安装 0.2.2 / 6 成功，冷启动 `Status: ok`。升级前已在登录页，本轮未据此宣称现有认证会话保留，登录表单可见字段前后相同。
+
+- `testDebugUnitTest`：50 项通过。新增原生／直接 Agent／ACP 能力与默认值校正、UUID 文案回退；扩展官方 REST 响应解析与 reasoning PATCH 合约，以及实际 TLS WebSocket 的 reasoning_effort 请求参数。
+- `connectedDebugAndroidTest`：API 36.1 / Android 16 模拟器最终全套 21 项通过，0 失败／跳过。包含 ACP 思考强度未确认时保留原值并阻止发送、刷新恢复、确认成功；强度按会话恢复且不泄漏到其他会话；既有附件、通知、登录和聊天回归。
+- Compose 新增供应商分组、模型 UUID 不展示、强度勾选与按钮同步、不支持思考时隐藏入口、搜索无结果／清空恢复，以及旧设备／模型选择回归。
+- 最终布局另在 320×600 dp 窄屏执行模型与设备 2 项专项回归，以及 960×800 dp 宽屏执行模型浮层 1 项专项回归，均通过。核对手机、窄屏、宽屏实际窗口截图，含搜索键盘：浮层收缩列表以保留按钮，宽屏右侧子菜单，手机同一浮层内返回。
+- 源码依据本地官方 Memoh `67fe0e6`：`model-options.vue`、`reasoning-effort.ts`、`useAgentModelCatalog.ts`、`chat-pane.vue`、SDK 类型及 ACP Go handler。仅展示服务端支持的档位；供应商读取失败不阻断模型使用。
+- 本轮请求验证使用模拟 REST / TLS WebSocket，未向用户真实 Agent 发送测试任务。截图模型与会话为测试数据。具体部署提供的档位取决于服务器能力。
+
+# v0.2.1 验证记录（上一版）
 
 2026-09-05；客户端更新，通知 logo、聊天附件上传、设备与模型选择。
 
