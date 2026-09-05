@@ -1,19 +1,19 @@
 # Memoh Android
 
-当前发布版本：`0.1.2`（versionCode 3）。修复明细见 [CHANGELOG.md](CHANGELOG.md)。
+当前发布版本：`0.2.0`（versionCode 4）。修复明细见 [CHANGELOG.md](CHANGELOG.md)。
 
-原生 Kotlin / Jetpack Compose 的 Memoh 聊天客户端。应用**不内置任何服务器地址**；首次启动和退出登录后必须手动输入 HTTPS 地址、用户名和密码。
+原生 Kotlin / Jetpack Compose 的 Memoh 聊天客户端。应用**不内置任何服务器地址**。首次启动输入 HTTPS URL、用户名和密码；勾选“记住登录信息”后，登录成功时三项一起加密保存在本机，下次打开登录页自动填入。取消勾选会清除记住的信息。退出登录清除会话令牌，但保留用户主动选择记住的登录表单。
 
 ## 功能
 
-- 中文优先的 Material 3 界面：登录、机器人、会话、新建会话、聊天、刷新、退出。
-- 自适应手机/平板布局：600 dp 起使用平板宽度约束和卡片网格，840 dp 起且高度充足时登录页使用双栏布局，低高度窗口降级单栏；表单可滚动，键盘弹出不会切换布局销毁焦点。聊天正文和输入区在大屏居中限宽，支持横竖屏切换。
+- 依据官方 Memoh mobile shell 和登录页重写原生 Compose 界面：官方 SVG logo、点阵登录背景、黑白主要按钮、浅紫用户气泡、简洁阅读区、双行输入胶囊、机器人切换和会话搜索。引用版本和许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 按官方 768 dp 断点切换手机左侧导航抽屉／平板 288 dp 常驻侧栏；聊天阅读区最大 840 dp，空会话输入区最大 704 dp。登录表单保持单栏、居中限宽、可滚动，键盘弹出不切换组件分支。
 - 登录后读取 `/users/me`、机器人、机器人设置、工作目录、会话和历史消息。
 - 创建会话前选择工作目录；只有一个活动目录时自动选中，但仍可改为不绑定。
 - 根据机器人设置创建默认 Agent / Pi（ACP 或直接运行时）会话：传递 `default_bot_agent_id`、运行时类型、项目元数据及工作目录。
 - 每个聊天页面一个机器人级 OkHttp WebSocket，优先使用 `Authorization: Bearer` 请求头；仅当握手明确返回 401 时，刷新认证并进行一次 `?token=` 兼容回退。
 - 支持断线重连、重新订阅、epoch/seq 缺口恢复、snapshot/delta、停止生成和工具批准/拒绝。消息只入队一次，断线后绝不自动重发；控制请求未确认时明确提示状态未知。
-- 展示文本、思考、工具、错误、通知及未知块。最终文本使用 Markwon，不使用 WebView；未引入图片插件，因而不会加载远程 Markdown 图片。
+- 展示文本、可折叠思考／工具详情、错误、通知及未知块，支持复制正文和返回最新消息；阅读旧消息时不强制跳底。流式和最终文本均使用 Markwon，不使用 WebView；未引入图片插件，因而不会加载远程 Markdown 图片。
 - 回复等待期间使用 `dataSync` 前台服务。服务使用第二条**只读**订阅监控完成状态，不发送或重发用户消息。
 - Android 13+ 在用户从可见界面发送时请求通知权限。
 
@@ -24,7 +24,10 @@
 - `network/MemohApi.kt`：可取消 REST、令牌单飞刷新、账户代次保护。临时网络错误不清除凭据。
 - `network/ChatSocket.kt`：串行 WebSocket 状态机、单次发送、关闭握手、重连/订阅。
 - `network/RuntimeReducer.kt`：权威快照和严格 epoch/seq 增量归并。
-- `security/TokenStore.kt`：AndroidKeyStore AES/GCM。
+- `security/TokenStore.kt`：AndroidKeyStore AES/GCM 会话令牌。
+- `security/EncryptedLoginStore.kt`：用户选择记住时，用独立 Keystore 密钥和随机 nonce 加密 URL、用户名和密码；不放入 SavedState、日志或通知。
+- `model/RuntimeFeedback.kt`：空 error 字段不会生成错误提示，errored/lost 仍有失败回退文案。
+- `ui/`：官方风格登录、适配手机／平板的导航、会话和消息组件。
 - `data/AppState.kt`：Compose 可观察 UI 状态、导航加载所有权和历史竞态保护。
 - `data/PendingOperationStore.kt`：服务与 UI 共享的账户/会话/invocation 状态。
 - `data/DraftStore.kt`：按账户和会话保存的 ViewModel 内存草稿，成功入队后才清除。
@@ -59,7 +62,7 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## 登录和 URL 规则
 
-登录页地址默认为空，只给出非持久化的通用提示。输入可以省略 scheme，此时补为 HTTPS；末尾没有 `/api` 时补上，已有 `/api` 时不会重复。HTTP 明文地址被拒绝。只有登录成功后，规范化地址才与令牌一起加密保存。密码从不持久化。
+没有记住的登录信息时，登录页地址默认为空，只给出通用提示。输入可以省略 scheme，此时补为 HTTPS；末尾没有 `/api` 时补上，已有 `/api` 时不会重复。HTTP 明文地址被拒绝。只有登录成功后，规范化地址才与令牌一起加密保存；勾选“记住登录信息”还会将登录表单的 URL、用户名和密码加密保存至独立存储。未勾选则不保存密码，取消勾选立即清除之前记住的表单；失败登录不会用错误密码覆盖已记住的信息。
 
 ## 权限与通知
 
@@ -81,9 +84,9 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## 安全说明
 
-- `allowBackup=false`，备份和设备迁移规则排除全部应用私有数据。
+- `allowBackup=false`，备份和设备迁移规则明确排除 root、sharedpref、file、database，包括加密登录记录。
 - AndroidKeyStore 内生成 AES 密钥，AES/GCM 使用随机 nonce 和固定版本 AAD；密钥失效或密文损坏会清除登录状态。
-- 不保存密码，不把凭据放入 Room、Intent、通知或日志。
+- 密码只在用户勾选“记住登录信息”且登录成功后加密保存在本机；不把凭据放入 Room、Intent、SavedState、通知或日志。记住的信息与会话令牌使用不同的 AndroidKeyStore 密钥，退出登录不删除用户选择记住的表单。
 - 禁止明文流量，只信任系统 CA；没有 trust-all、宽松主机名验证、自签 TLS 绕过或证书固定。
 - OkHttp 不安装请求/响应 body 日志拦截器，发布构建不输出认证、查询或正文。
 - 不使用 WebView；Markwon core 不启用 HTML 插件和远程图片插件，并在渲染前阻止危险 URI scheme。

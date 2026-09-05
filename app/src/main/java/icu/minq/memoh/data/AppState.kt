@@ -11,6 +11,7 @@ import icu.minq.memoh.network.ApiException
 import icu.minq.memoh.network.ChatSocket
 import icu.minq.memoh.network.ChatSocketListener
 import icu.minq.memoh.service.PendingReplyService
+import icu.minq.memoh.security.RememberedLogin
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,10 +39,11 @@ data class UiState(
     val pendingControls: Set<String> = emptySet(),
     val draft: String = "",
     val sendInFlight: Boolean = false,
+    val rememberedLogin: RememberedLogin? = null,
 )
 
 class AppState(application: Application, private val container: AppContainer, private val savedState: SavedStateHandle) : AndroidViewModel(application) {
-    private val mutable = MutableStateFlow(UiState(pending = container.pendingStore.read()))
+    private val mutable = MutableStateFlow(UiState(pending = container.pendingStore.read(), rememberedLogin = container.loginStore?.read()))
     val state = mutable.asStateFlow()
     private var chatSocket: ChatSocket? = null
     private var recoverySocket: ChatSocket? = null
@@ -69,12 +71,24 @@ class AppState(application: Application, private val container: AppContainer, pr
         }
     }
 
-    fun login(server: String, username: String, password: String) = launchLoad { generation, auth ->
+    fun login(server: String, username: String, password: String, rememberLogin: Boolean = false) = launchLoad { generation, auth ->
+        if (!rememberLogin) container.loginStore?.clear()
         val user = container.api.login(server, username, password)
+        if (!isCurrent(generation, auth)) return@launchLoad
+        if (rememberLogin) container.loginStore?.write(RememberedLogin(server.trim(), username.trim(), password))
         val bots = container.api.bots()
         if (!isCurrent(generation, auth)) return@launchLoad
         installUser(user, bots)
         recoverPending()
+    }
+
+    fun forgetLogin() {
+        try {
+            container.loginStore?.clear()
+            mutable.value = mutable.value.copy(rememberedLogin = null)
+        } catch (_: Exception) {
+            mutable.value = mutable.value.copy(error = "无法清除已记住的登录信息，请重试")
+        }
     }
 
     fun bootstrap(deepLinkBotId: String = "", deepLinkSessionId: String = "") {
@@ -167,7 +181,9 @@ class AppState(application: Application, private val container: AppContainer, pr
     fun refreshSessions() = launchLoad { generation, auth ->
         val bot = mutable.value.bot ?: return@launchLoad
         val resources = loadBotResources(bot)
-        if (isCurrent(generation, auth)) commitBot(bot, resources)
+        if (isCurrent(generation, auth)) mutable.value = mutable.value.copy(settings = resources.settings,
+            settingsAvailable = resources.settingsAvailable, workdirs = resources.workdirs,
+            workdirsAvailable = resources.workdirsAvailable, sessions = resources.sessions)
     }
     fun createSession(title: String, workdirId: String?) = launchLoad { generation, auth ->
         val value = mutable.value
@@ -336,6 +352,11 @@ class AppState(application: Application, private val container: AppContainer, pr
         }
     }
 
+    fun showBots() {
+        if (mutable.value.screen == Screen.Chat) back()
+        if (mutable.value.screen == Screen.Sessions) back()
+    }
+
     fun logout() { container.api.clearAuth(); resetLocalSession(null) }
     private fun resetLocalSession(error: String?) {
         authGeneration++; navigationGeneration++
@@ -346,7 +367,7 @@ class AppState(application: Application, private val container: AppContainer, pr
         container.pendingStore.clear()
         drafts.clear(); controls.clear(); accountKey = ""
         savedState[KEY_BOT] = ""; savedState[KEY_SESSION] = ""
-        mutable.value = UiState(error = error)
+        mutable.value = UiState(error = error, rememberedLogin = container.loginStore?.read())
         bootstrapped = true
     }
     fun clearError() { mutable.value = mutable.value.copy(error = null) }
@@ -368,10 +389,14 @@ class AppState(application: Application, private val container: AppContainer, pr
         return try { load() to true } catch (failure: ApiException) { if (failure.status == 403) fallback to false else throw failure }
     }
     private fun commitBot(bot: Bot, resources: BotResources) {
+        chatSocket?.close(); chatSocket = null
+        historyJob?.cancel(); terminalReconciliationKey = null; controls.clear()
         savedState[KEY_BOT] = bot.id; savedState[KEY_SESSION] = ""
         mutable.value = mutable.value.copy(screen = Screen.Sessions, bot = bot, settings = resources.settings,
             settingsAvailable = resources.settingsAvailable, workdirs = resources.workdirs,
-            workdirsAvailable = resources.workdirsAvailable, sessions = resources.sessions)
+            workdirsAvailable = resources.workdirsAvailable, sessions = resources.sessions, session = null,
+            history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null,
+            pendingControls = emptySet(), draft = "")
     }
     private fun refreshHistoryAfterTerminal(botId: String, sessionId: String, auth: Long, key: String) = viewModelScope.launch {
         try {

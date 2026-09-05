@@ -12,12 +12,12 @@ class WindowWidthClassTest {
     @Test
     fun mediumFrom600Dp() {
         assertEquals(AppWindowWidthClass.Medium, classifyWindowWidth(600f))
-        assertEquals(AppWindowWidthClass.Medium, classifyWindowWidth(839.9f))
+        assertEquals(AppWindowWidthClass.Medium, classifyWindowWidth(767.9f))
     }
 
     @Test
-    fun expandedFrom840Dp() {
-        assertEquals(AppWindowWidthClass.Expanded, classifyWindowWidth(840f))
+    fun expandedAtOfficial768DpShellBreakpoint() {
+        assertEquals(AppWindowWidthClass.Expanded, classifyWindowWidth(768f))
         assertEquals(AppWindowWidthClass.Expanded, classifyWindowWidth(1280f))
     }
 }

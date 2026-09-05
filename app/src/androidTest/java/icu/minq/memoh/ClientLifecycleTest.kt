@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(AndroidJUnit4::class)
 class ClientLifecycleTest {
-    @Test fun returningWhileRefreshIsPendingClearsLoading() = runBlocking {
+    @Test fun sessionRefreshPreservesChatAndReturningCancelsLoading() = runBlocking {
         val application = ApplicationProvider.getApplicationContext<MemohApplication>()
         val hold = AtomicBoolean(false)
         val started = CountDownLatch(1)
@@ -59,6 +59,14 @@ class ClientLifecycleTest {
             withTimeout(5_000) { app.state.first { it.screen == Screen.Bots && !it.loading } }
             withContext(Dispatchers.Main) { app.selectBot(app.state.value.bots.single()) }
             withTimeout(5_000) { app.state.first { it.screen == Screen.Sessions && !it.loading } }
+            withContext(Dispatchers.Main) { app.openSession(icu.minq.memoh.model.Session("s", "b")) }
+            withTimeout(5_000) { app.state.first { it.screen == Screen.Chat && !it.loading } }
+            withContext(Dispatchers.Main) { app.editDraft("keep this draft"); app.refreshSessions() }
+            withTimeout(5_000) { app.state.first { !it.loading } }
+            assertEquals(Screen.Chat, app.state.value.screen)
+            assertEquals("s", app.state.value.session?.id)
+            assertEquals("keep this draft", app.state.value.draft)
+            withContext(Dispatchers.Main) { app.back() }
             hold.set(true)
             withContext(Dispatchers.Main) { app.refreshSessions() }
             assertTrue(started.await(3, TimeUnit.SECONDS))
