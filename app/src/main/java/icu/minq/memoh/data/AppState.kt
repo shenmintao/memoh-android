@@ -1,6 +1,7 @@
 package icu.minq.memoh.data
 
 import android.app.Application
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
@@ -15,6 +16,8 @@ import icu.minq.memoh.security.RememberedLogin
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 
 sealed interface Screen { data object Login : Screen; data object Bots : Screen; data object Sessions : Screen; data object Chat : Screen }
@@ -40,6 +43,8 @@ data class UiState(
     val draft: String = "",
     val sendInFlight: Boolean = false,
     val rememberedLogin: RememberedLogin? = null,
+    val attachments: List<DraftAttachment> = emptyList(),
+    val composer: ComposerConfig = ComposerConfig(),
 )
 
 class AppState(application: Application, private val container: AppContainer, private val savedState: SavedStateHandle) : AndroidViewModel(application) {
@@ -56,6 +61,18 @@ class AppState(application: Application, private val container: AppContainer, pr
     private var terminalReconciliationKey: String? = null
     private val controls = mutableMapOf<String, String>()
     private val drafts = DraftStore()
+    private val attachments = AttachmentDraftStore()
+    private val attachmentReader = AttachmentReader(application.contentResolver)
+    private val attachmentJobs = mutableMapOf<String, Job>()
+    private val attachmentReadLock = Mutex()
+    private data class PickerContext(val key: String, val auth: Long)
+    private var pickerContext: PickerContext? = null
+    private val modelSelections = mutableMapOf<String, String>()
+    private val targetSelections = mutableMapOf<String, String>()
+    private var modelsJob: Job? = null
+    private var targetsJob: Job? = null
+    private var modelVersion = 0L
+    private var targetVersion = 0L
     private var accountKey = ""
 
     init {
@@ -207,7 +224,11 @@ class AppState(application: Application, private val container: AppContainer, pr
         controls.clear()
         mutable.value = mutable.value.copy(screen = Screen.Chat, session = session, history = history,
             runtime = RuntimeState(sessionId = session.id), connected = false, connectionFailure = null,
-            pendingControls = emptySet(), draft = drafts.get(draftKey(bot.id, session.id)))
+            pendingControls = emptySet(), draft = drafts.get(draftKey(bot.id, session.id)),
+            attachments = attachments.get(draftKey(bot.id, session.id)), composer = ComposerConfig(
+                modelId = modelSelections[draftKey(bot.id, session.id)] ?: if (session.type == "subagent") session.metadataString("model_uuid") else "",
+                defaultModelId = if (session.isAgentRuntime()) "" else mutable.value.settings.chatModelId.orEmpty(),
+                targetId = if (session.canSelectDevice()) targetSelections[draftKey(bot.id, session.id)] ?: session.workspaceTargetId() else ""))
         savedState[KEY_BOT] = bot.id; savedState[KEY_SESSION] = session.id
         lateinit var candidate: ChatSocket
         candidate = ChatSocket(container.api, bot.id, session.id, object : ChatSocketListener {
@@ -255,9 +276,183 @@ class AppState(application: Application, private val container: AppContainer, pr
         })
         chatSocket = candidate
         candidate.connect()
+        refreshModels()
+        refreshDevices()
     }
 
     private fun draftKey(botId: String, sessionId: String) = "$accountKey:$botId:$sessionId"
+    private fun visibleDraftKey(): String? = mutable.value.takeIf { it.screen == Screen.Chat }?.let { value ->
+        val bot = value.bot ?: return@let null
+        val session = value.session ?: return@let null
+        draftKey(bot.id, session.id)
+    }
+
+    fun beginFileSelection(): Boolean {
+        val key = visibleDraftKey() ?: return false
+        if (mutable.value.session.isExternalChannel() || mutable.value.sendInFlight) return false
+        pickerContext = PickerContext(key, authGeneration)
+        return true
+    }
+
+    fun attachFiles(uris: List<Uri>) {
+        val context = pickerContext.also { pickerContext = null } ?: return
+        if (context.auth != authGeneration || context.key != visibleDraftKey()) return
+        uris.distinct().forEach { uri ->
+            val draft = DraftAttachment(UUID.randomUUID().toString(), uri.toString())
+            if (attachments.get(context.key).any { it.uri == draft.uri }) return@forEach
+            if (!attachments.add(context.key, draft)) {
+                mutable.value = mutable.value.copy(error = "每条消息最多添加 10 个文件")
+            } else readAttachment(context.key, context.auth, draft)
+        }
+        publishAttachments(context.key)
+    }
+    fun filePickerUnavailable() { pickerContext = null; mutable.value = mutable.value.copy(error = "无法打开系统文件选择器，请稍后重试") }
+
+    fun removeAttachment(id: String) {
+        if (mutable.value.sendInFlight) return
+        val key = visibleDraftKey() ?: return
+        attachmentJobs.remove(id)?.cancel()
+        attachments.remove(key, id)
+        publishAttachments(key)
+    }
+    fun retryAttachment(id: String) {
+        if (mutable.value.sendInFlight) return
+        val key = visibleDraftKey() ?: return
+        val draft = attachments.get(key).firstOrNull { it.id == id && it.error != null } ?: return
+        attachments.update(key, draft.copy(error = null, payload = null, size = 0))
+        publishAttachments(key)
+        readAttachment(key, authGeneration, draft)
+    }
+    private fun readAttachment(key: String, auth: Long, draft: DraftAttachment) {
+        attachmentJobs[draft.id] = viewModelScope.launch {
+            try {
+                val ready = attachmentReadLock.withLock { withTimeout(60_000) { attachmentReader.read(draft) } }
+                if (auth == authGeneration) attachments.update(key, ready)
+            } catch (_: TimeoutCancellationException) {
+                if (auth == authGeneration) attachments.update(key, draft.copy(error = "读取超时，请重试或选择本机文件"))
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                if (auth == authGeneration) attachments.update(key, draft.copy(error = if (failure is IllegalArgumentException) failure.message ?: "无法读取文件，请重新选择" else "无法读取文件，请重试或重新选择"))
+            } finally {
+                attachmentJobs.remove(draft.id)
+                if (auth == authGeneration) publishAttachments(key)
+            }
+        }
+    }
+    private fun publishAttachments(key: String) {
+        if (key == visibleDraftKey()) mutable.value = mutable.value.copy(attachments = attachments.get(key))
+    }
+
+    private fun configurationLocked() = mutable.value.let { it.loading || it.sendInFlight || it.composer.modelChanging || it.pending?.blocksSend == true || it.runtime.run?.let { run -> !run.isTerminal() } == true || it.session.isExternalChannel() }
+    private fun updateComposer(block: (ComposerConfig) -> ComposerConfig) { mutable.value = mutable.value.copy(composer = block(mutable.value.composer)) }
+    private fun composerCurrent(key: String, auth: Long) = key == visibleDraftKey() && auth == authGeneration
+
+    fun refreshModels() {
+        val value = mutable.value
+        if (value.composer.modelChanging || value.session.isExternalChannel()) return
+        val bot = value.bot ?: return
+        val session = value.session ?: return
+        val key = visibleDraftKey() ?: return
+        val auth = authGeneration
+        val version = ++modelVersion
+        modelsJob?.cancel()
+        updateComposer { it.copy(modelsLoading = true, modelsError = null) }
+        modelsJob = viewModelScope.launch {
+            try {
+                val catalog = when {
+                    session.runtimeType == "acp_agent" || session.type == "acp_agent" -> {
+                        val runtime = container.api.ensureACPRuntime(bot.id, session.id)
+                        ExternalModels(runtime.models?.availableModels.orEmpty(), runtime.models?.currentModelId.orEmpty())
+                    }
+                    session.runtimeType in setOf("codex", "claude-code") -> {
+                        val agent = session.botAgentId?.takeIf { it.isNotBlank() } ?: value.settings.defaultBotAgentId?.takeIf { it.isNotBlank() }
+                            ?: throw IllegalStateException("会话未指定 Agent，无法读取模型")
+                        container.api.agentModels(bot.id, agent)
+                    }
+                    else -> ExternalModels(container.api.models(), value.settings.chatModelId.orEmpty())
+                }
+                if (composerCurrent(key, auth) && version == modelVersion) {
+                    val isACP = session.runtimeType == "acp_agent" || session.type == "acp_agent"
+                    val choices = catalog.models.filter { it.id.isNotBlank() }.distinctBy { it.id }
+                    updateComposer { it.copy(models = choices, modelUncertain = false,
+                        modelId = if (isACP) catalog.configuredModelId else it.modelId,
+                        defaultModelId = catalog.configuredModelId.ifBlank { choices.firstOrNull { model -> model.default }?.id.orEmpty() }) }
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                if (composerCurrent(key, auth) && version == modelVersion) updateComposer { it.copy(modelsError = configError("模型", failure)) }
+            } finally {
+                if (composerCurrent(key, auth) && version == modelVersion) updateComposer { it.copy(modelsLoading = false) }
+            }
+        }
+    }
+
+    fun selectModel(id: String) {
+        val value = mutable.value
+        val session = value.session ?: return
+        val bot = value.bot ?: return
+        val key = visibleDraftKey() ?: return
+        if (configurationLocked() || value.composer.modelsLoading || (id.isNotBlank() && value.composer.models.none { it.id == id })) return
+        if (session.runtimeType != "acp_agent" && session.type != "acp_agent") {
+            modelSelections[key] = id
+            updateComposer { it.copy(modelId = id, modelsError = null) }
+            return
+        }
+        if (id.isBlank()) return
+        val auth = authGeneration
+        val version = ++modelVersion
+        modelsJob?.cancel()
+        updateComposer { it.copy(modelChanging = true, modelsError = null) }
+        modelsJob = viewModelScope.launch {
+            try {
+                val runtime = container.api.setACPModel(bot.id, session.id, id)
+                if (runtime.models?.currentModelId != id) throw IllegalStateException("Agent 未确认模型切换，请刷新后重试")
+                if (composerCurrent(key, auth) && version == modelVersion) {
+                    modelSelections[key] = id
+                    updateComposer { it.copy(modelId = id, models = runtime.models.availableModels) }
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                if (composerCurrent(key, auth) && version == modelVersion) updateComposer { it.copy(modelsError = "模型切换未确认，请刷新后重试", modelUncertain = true) }
+            } finally {
+                if (composerCurrent(key, auth) && version == modelVersion) updateComposer { it.copy(modelChanging = false) }
+            }
+        }
+    }
+
+    fun refreshDevices() {
+        val value = mutable.value
+        val bot = value.bot ?: return
+        if (value.session?.canSelectDevice() != true) return
+        val key = visibleDraftKey() ?: return
+        val auth = authGeneration
+        val version = ++targetVersion
+        targetsJob?.cancel()
+        if (!bot.hasPermission("workspace_read")) { updateComposer { it.copy(targetsError = "当前账户没有读取设备的权限") }; return }
+        updateComposer { it.copy(targetsLoading = true, targetsError = null) }
+        targetsJob = viewModelScope.launch {
+            try {
+                val targets = container.api.workspaceTargets(bot.id)
+                if (composerCurrent(key, auth) && version == targetVersion) updateComposer { it.copy(targets = targets,
+                    targetId = it.targetId.ifBlank { targets.firstOrNull { target -> target.primary }?.targetId ?: targets.firstOrNull { target -> target.kind == "native" }?.targetId.orEmpty() }) }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { if (composerCurrent(key, auth) && version == targetVersion) updateComposer { it.copy(targetsError = configError("设备", failure)) } }
+            finally { if (composerCurrent(key, auth) && version == targetVersion) updateComposer { it.copy(targetsLoading = false) } }
+        }
+    }
+    fun selectDevice(id: String) {
+        val value = mutable.value
+        val key = visibleDraftKey() ?: return
+        if (configurationLocked() || value.session?.canSelectDevice() != true || value.composer.targetsLoading) return
+        if (value.composer.targets.none { it.targetId == id && it.available() }) return
+        targetSelections[key] = id
+        updateComposer { it.copy(targetId = id) }
+    }
+    private fun configError(label: String, failure: Exception): String = when ((failure as? ApiException)?.status) {
+        403 -> "当前账户无权读取${label}列表"
+        404 -> "服务器暂不提供${label}列表"
+        else -> "无法读取${label}列表，请重试"
+    }
     fun editDraft(text: String) {
         val value = mutable.value
         val bot = value.bot ?: return
@@ -272,13 +467,18 @@ class AppState(application: Application, private val container: AppContainer, pr
         val bot = value.bot ?: return
         val session = value.session ?: return
         val socket = chatSocket
-        if (text.isBlank()) return
+        if (text.isBlank() && value.attachments.isEmpty()) return
         val blocked = when {
             value.sendInFlight -> "消息正在排队"
+            value.loading || value.composer.modelChanging -> "会话配置正在更新"
+            value.composer.modelUncertain -> "模型切换未确认，请刷新模型列表"
+            value.attachments.any { it.preparing } -> "文件正在读取，请稍候"
+            value.attachments.any { it.error != null } -> "请重试或移除读取失败的附件"
             session.isExternalChannel() -> "外部渠道会话仅供只读查看"
             !value.connected || socket == null || !socket.isUsable() -> "实时连接尚未就绪，无法发送"
             value.runtime.run?.let { !it.isTerminal() } == true -> "当前回复尚未结束"
             container.pendingStore.read()?.blocksSend == true -> "上一条消息状态待核对，请查看上方提示"
+            session.canSelectDevice() && value.composer.targetId.isNotBlank() && value.composer.targets.none { it.targetId == value.composer.targetId && it.available() } -> "所选设备不可用，请重新选择或刷新设备列表"
             else -> null
         }
         if (blocked != null) { mutable.value = mutable.value.copy(error = blocked); return }
@@ -296,13 +496,16 @@ class AppState(application: Application, private val container: AppContainer, pr
         }
         val auth = authGeneration
         val key = draftKey(bot.id, session.id)
-        socket!!.sendMessage(text.trim(), pending.invocationId) { queued ->
+        val submittedAttachments = value.attachments.map { it.id }.toSet()
+        socket!!.sendMessage(text.trim(), pending.invocationId, value.attachments.mapNotNull { it.payload }, value.composer.modelId,
+            if (session.canSelectDevice()) value.composer.targetId else "") { queued ->
             if (auth != authGeneration) return@sendMessage
-            if (queued) drafts.queued(key, text)
+            if (queued) { drafts.queued(key, text); attachments.queued(key, submittedAttachments) }
             else container.pendingStore.update(pending) { it.copy(phase = PendingPhase.FAILED) }
             val visible = mutable.value.bot?.id == bot.id && mutable.value.session?.id == session.id
             mutable.value = mutable.value.copy(sendInFlight = false,
                 draft = if (visible) drafts.get(key) else mutable.value.draft,
+                attachments = if (visible) attachments.get(key) else mutable.value.attachments,
                 error = if (!queued) "消息未发送：连接已断开，草稿已保留" else mutable.value.error)
         }
     }
@@ -336,13 +539,14 @@ class AppState(application: Application, private val container: AppContainer, pr
     fun back() {
         navigationGeneration++
         loadJob?.cancel(); historyJob?.cancel()
+        modelsJob?.cancel(); targetsJob?.cancel(); modelVersion++; targetVersion++
         mutable.value = mutable.value.copy(loading = false)
         when (mutable.value.screen) {
             Screen.Chat -> {
                 chatSocket?.close(); chatSocket = null
                 savedState[KEY_SESSION] = ""
                 controls.clear()
-                mutable.value = mutable.value.copy(screen = Screen.Sessions, session = null, history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null, pendingControls = emptySet(), draft = "")
+                mutable.value = mutable.value.copy(screen = Screen.Sessions, session = null, history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null, pendingControls = emptySet(), draft = "", attachments = emptyList(), composer = ComposerConfig())
             }
             Screen.Sessions -> {
                 savedState[KEY_BOT] = ""; savedState[KEY_SESSION] = ""
@@ -366,6 +570,9 @@ class AppState(application: Application, private val container: AppContainer, pr
         getApplication<Application>().stopService(android.content.Intent(getApplication(), PendingReplyService::class.java))
         container.pendingStore.clear()
         drafts.clear(); controls.clear(); accountKey = ""
+        modelsJob?.cancel(); targetsJob?.cancel(); modelVersion++; targetVersion++
+        attachmentJobs.values.toList().forEach { it.cancel() }; attachmentJobs.clear(); attachments.clear(); pickerContext = null
+        modelSelections.clear(); targetSelections.clear()
         savedState[KEY_BOT] = ""; savedState[KEY_SESSION] = ""
         mutable.value = UiState(error = error, rememberedLogin = container.loginStore?.read())
         bootstrapped = true
@@ -391,12 +598,13 @@ class AppState(application: Application, private val container: AppContainer, pr
     private fun commitBot(bot: Bot, resources: BotResources) {
         chatSocket?.close(); chatSocket = null
         historyJob?.cancel(); terminalReconciliationKey = null; controls.clear()
+        modelsJob?.cancel(); targetsJob?.cancel(); modelVersion++; targetVersion++
         savedState[KEY_BOT] = bot.id; savedState[KEY_SESSION] = ""
         mutable.value = mutable.value.copy(screen = Screen.Sessions, bot = bot, settings = resources.settings,
             settingsAvailable = resources.settingsAvailable, workdirs = resources.workdirs,
             workdirsAvailable = resources.workdirsAvailable, sessions = resources.sessions, session = null,
             history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null,
-            pendingControls = emptySet(), draft = "")
+            pendingControls = emptySet(), draft = "", attachments = emptyList(), composer = ComposerConfig())
     }
     private fun refreshHistoryAfterTerminal(botId: String, sessionId: String, auth: Long, key: String) = viewModelScope.launch {
         try {

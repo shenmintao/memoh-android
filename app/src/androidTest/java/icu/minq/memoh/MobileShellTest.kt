@@ -25,13 +25,17 @@ class MobileShellTest {
         runtime = RuntimeState("s", "e", 4, RuntimeRun("r", "t", status = "completed", error = "", request_user_turn = ChatTurn("t", "user", "先从界面开始吧，保持简单。"),
             messages = listOf(MessageBlock(0, "reasoning", "先梳理页面结构，再确定信息层级。"), MessageBlock(1, "text", "好的。让对话成为中心，让导航随时可达。\n\n**下一步**\n\n我们可以先完成登录、会话切换和消息输入，再逐步打磨细节。"))), false))
 
-    private fun screenshot(name: String) {
+    private fun screenshot(name: String, dialog: Boolean = false) {
         compose.waitForIdle()
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val dir = androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("additionalTestOutputDir")?.let(::File) ?: context.getExternalFilesDir("qa")!!
         dir.mkdirs()
         val width = context.resources.configuration.screenWidthDp
-        File(dir, "$name-$width.png").outputStream().use { compose.onRoot().captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it) }
+        // Capture the actual window, including popovers/IME; forcing Compose redraw can time out on emulators.
+        Thread.sleep(if (dialog) 1_000 else 350)
+        compose.waitForIdle()
+        val bitmap = requireNotNull(androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot())
+        File(dir, "$name-$width.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
     @Test fun completedReplyHasNoFalseErrorAndNextMessageCanBeSent() {
@@ -91,5 +95,49 @@ class MobileShellTest {
         compose.setContent { MemohTheme(darkTheme = true) { MemohShell(chat()) } }
         compose.onNodeWithText("发生错误").assertDoesNotExist()
         screenshot("chat-dark")
+    }
+
+    @Test fun attachmentsCanBeRemovedRetriedAndSentWithoutText() {
+        val payload = ChatAttachment(name = "项目说明.pdf", mime = "application/pdf", base64 = "data:application/pdf;base64,YQ==")
+        var state by mutableStateOf(chat().copy(draft = "", attachments = listOf(DraftAttachment("a", "content://fixture/a", "项目说明.pdf", 1024, payload))))
+        var sent = false
+        var retried = false
+        var pickerOpened = false
+        compose.setContent { MemohTheme { MemohShell(state, UiActions(send = { sent = true }, chooseFiles = { pickerOpened = true },
+            removeAttachment = { state = state.copy(attachments = state.attachments.filterNot { file -> file.id == it }) }, retryAttachment = { retried = true })) } }
+        compose.onNodeWithText("项目说明.pdf").assertIsDisplayed()
+        compose.onNodeWithContentDescription("发送").assertIsEnabled().performClick()
+        compose.runOnIdle { assertTrue(sent) }
+        screenshot("composer-attachments")
+        compose.onNodeWithContentDescription("移除附件 项目说明.pdf").performClick()
+        compose.onNodeWithContentDescription("发送").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("添加文件").performClick()
+        compose.runOnIdle { assertTrue(pickerOpened); state = state.copy(attachments = listOf(DraftAttachment("f", "content://fixture/f", "读取失败.txt", error = "无法读取文件"))) }
+        compose.onNodeWithContentDescription("发送").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("重试附件 读取失败.txt").performClick()
+        compose.runOnIdle { assertTrue(retried) }
+    }
+
+    @Test fun modelAndDevicePickersApplySelectionAndDisableOfflineDevices() {
+        var state by mutableStateOf(chat().copy(composer = ComposerConfig(models = listOf(ChatModel("m1", "模型一"), ChatModel("m2", "模型二")), defaultModelId = "m1",
+            targets = listOf(WorkspaceTarget("native", "native"), WorkspaceTarget("remote:on", "remote", "办公电脑", true, "online"), WorkspaceTarget("remote:off", "remote", "离线电脑", false, "offline")), targetId = "native")))
+        compose.setContent { MemohTheme { MemohShell(state, UiActions(selectModel = { state = state.copy(composer = state.composer.copy(modelId = it)) },
+            selectDevice = { state = state.copy(composer = state.composer.copy(targetId = it)) })) } }
+        compose.onNodeWithContentDescription("选择模型").performClick()
+        compose.onNodeWithText("搜索模型").performTextInput("模型二")
+        compose.onNodeWithTag("model-options").performScrollToNode(hasText("模型二"))
+        compose.onNodeWithText("完成").assertIsDisplayed()
+        screenshot("model-picker-search", dialog = true)
+        compose.onNode(hasText("模型二") and !hasSetTextAction() and hasClickAction()).performClick()
+        compose.runOnIdle { assertEquals("m2", state.composer.modelId) }
+        screenshot("model-picker", dialog = true)
+        compose.onNodeWithText("完成").performClick()
+        compose.onNodeWithContentDescription("选择设备：服务器工作区").performClick()
+        compose.onNodeWithText("离线电脑").assertIsNotEnabled()
+        compose.onNodeWithText("办公电脑").performClick()
+        compose.runOnIdle { assertEquals("remote:on", state.composer.targetId) }
+        screenshot("device-picker", dialog = true)
+        compose.onNodeWithText("完成").performClick()
+        compose.onNodeWithContentDescription("选择设备：办公电脑").assertIsDisplayed()
     }
 }

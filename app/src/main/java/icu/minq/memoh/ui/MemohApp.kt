@@ -9,6 +9,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,13 +41,25 @@ internal data class UiActions(
     val showBots: () -> Unit = {}, val logout: () -> Unit = {}, val clearError: () -> Unit = {},
     val openPending: () -> Unit = {}, val resumePending: () -> Unit = {}, val acknowledgeUnknown: (String) -> Unit = {},
     val forgetLogin: () -> Unit = {},
+    val chooseFiles: () -> Unit = {}, val removeAttachment: (String) -> Unit = {}, val retryAttachment: (String) -> Unit = {},
+    val refreshModels: () -> Unit = {}, val selectModel: (String) -> Unit = {},
+    val refreshDevices: () -> Unit = {}, val selectDevice: (String) -> Unit = {},
 )
 
 @Composable fun MemohApp(app: AppState, startVisibleSend: (() -> Unit) -> Unit) {
     val state by app.state.collectAsStateWithLifecycle()
+    val files = rememberLauncherForActivityResult(remember { OpenChatDocuments() }, app::attachFiles)
     MemohShell(state, UiActions(app::login, app::selectBot, app::openSession, app::createSession,
         app::refreshBots, app::refreshSessions, app::editDraft, { text -> startVisibleSend { app.send(text) } },
-        app::stop, app::decide, app::showBots, app::logout, app::clearError, app::openPending, app::resumePending, app::acknowledgeUnknown, app::forgetLogin))
+        app::stop, app::decide, app::showBots, app::logout, app::clearError, app::openPending, app::resumePending, app::acknowledgeUnknown, app::forgetLogin,
+        chooseFiles = { if (app.beginFileSelection()) runCatching { files.launch(arrayOf("*/*")) }.onFailure { app.filePickerUnavailable() } },
+        removeAttachment = app::removeAttachment, retryAttachment = app::retryAttachment,
+        refreshModels = app::refreshModels, selectModel = app::selectModel, refreshDevices = app::refreshDevices, selectDevice = app::selectDevice))
+}
+
+private class OpenChatDocuments : ActivityResultContracts.OpenMultipleDocuments() {
+    override fun createIntent(context: android.content.Context, input: Array<String>): android.content.Intent =
+        super.createIntent(context, input).addCategory(android.content.Intent.CATEGORY_OPENABLE)
 }
 
 /** Native composition of the official mobile bar + navigation sheet + chat reading plane. */

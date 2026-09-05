@@ -95,13 +95,15 @@ import kotlinx.coroutines.launch
 @Composable private fun Composer(state: UiState, actions: UiActions) {
     val readOnly = state.session.isExternalChannel()
     val running = state.runtime.run?.let { !it.isTerminal() } == true
-    val canSend = !readOnly && state.connected && state.connectionFailure == null && !running && state.pending?.blocksSend != true && !state.sendInFlight
+    val canSend = !readOnly && state.connected && state.connectionFailure == null && !running && state.pending?.blocksSend != true && !state.sendInFlight && !state.loading && !state.composer.modelChanging && !state.composer.modelUncertain && state.attachments.all { it.payload != null }
     val dir = state.workdirs.firstOrNull { it.id == state.session?.workdirId }
-    var details by remember { mutableStateOf(false) }
+    var models by remember { mutableStateOf(false) }
+    var devices by remember { mutableStateOf(false) }
     Column {
         Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceBright,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
             Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                AttachmentTray(state, actions)
                 BasicTextField(state.draft, actions.editDraft, Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 4.dp, vertical = 6.dp).semantics { contentDescription = "消息输入框" },
                     enabled = !readOnly, readOnly = readOnly, maxLines = 6,
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
@@ -113,18 +115,26 @@ import kotlinx.coroutines.launch
                         }
                     })
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Surface(onClick = { details = true }, shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                    IconButton(actions.chooseFiles, enabled = !readOnly && !state.sendInFlight, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Default.Add, "添加文件", Modifier.size(22.dp))
+                    }
+                    IconButton({ devices = true; actions.refreshDevices() }, enabled = !readOnly, modifier = Modifier.size(44.dp)) {
+                        Icon(if (state.session?.workdirId.isNullOrBlank()) Icons.Default.Computer else Icons.Default.FolderOpen,
+                            "选择设备：${if (state.session?.workdirId.isNullOrBlank()) state.composer.targetLabel() else dir?.name ?: "已绑定工作目录"}", Modifier.size(20.dp))
+                    }
+                    Surface(onClick = { models = true; actions.refreshModels() }, enabled = !readOnly, modifier = Modifier.weight(1f).semantics { contentDescription = "选择模型" }, shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
                         Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             Icon(Icons.Default.AutoAwesome, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(state.bot?.label() ?: "Memoh", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 140.dp))
-                            Icon(Icons.Default.ExpandMore, "会话信息", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(state.composer.modelLabel(), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            if (state.composer.modelChanging || state.composer.modelsLoading) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
+                            else Icon(Icons.Default.ExpandMore, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    Spacer(Modifier.weight(1f))
+                    Spacer(Modifier.width(8.dp))
                     if (running && !readOnly) FilledIconButton(actions.stop, enabled = state.connected && state.pendingControls.isEmpty(), modifier = Modifier.size(40.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.onSurface, contentColor = MaterialTheme.colorScheme.surface)) {
                         Icon(Icons.Default.Stop, "停止生成", Modifier.size(20.dp))
-                    } else FilledIconButton({ if (canSend && state.draft.isNotBlank()) actions.send(state.draft) }, enabled = canSend && state.draft.isNotBlank(), modifier = Modifier.size(40.dp),
+                    } else FilledIconButton({ if (canSend && (state.draft.isNotBlank() || state.attachments.isNotEmpty())) actions.send(state.draft) }, enabled = canSend && (state.draft.isNotBlank() || state.attachments.isNotEmpty()), modifier = Modifier.size(40.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.onSurface, contentColor = MaterialTheme.colorScheme.surface,
                             disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh, disabledContentColor = MaterialTheme.colorScheme.outline)) {
                         Icon(Icons.Default.ArrowUpward, "发送", Modifier.size(20.dp))
@@ -134,27 +144,27 @@ import kotlinx.coroutines.launch
         }
         val hint = when {
             readOnly -> "在原渠道中回复此会话"
+            state.sendInFlight -> if (state.attachments.isNotEmpty()) "正在提交消息和附件…" else "正在提交消息…"
+            state.composer.modelChanging -> "正在切换模型…"
+            state.composer.modelUncertain -> "模型切换未确认，请打开模型选择器刷新"
+            state.attachments.any { it.preparing } -> "正在读取文件…"
             state.connectionFailure != null -> "连接不可用，请重新打开会话"
             !state.connected -> "正在连接服务器…"
             state.pending?.blocksSend == true && !running -> "正在确认上一条消息的状态…"
             running -> if (state.runtime.run.isWaitingApproval()) "等待你的批准" else "正在回复…"
-            else -> dir?.name.orEmpty()
+            else -> dir?.name ?: if (state.session?.canSelectDevice() == true && state.composer.targetId.isNotBlank()) state.composer.targetLabel() else ""
         }
         if (hint.isNotBlank()) Text(hint, Modifier.padding(start = 8.dp, top = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    if (details) AlertDialog(onDismissRequest = { details = false }, title = { Text("会话信息") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(state.bot?.label().orEmpty())
-            Text("运行时：${state.session?.runtimeType}", style = MaterialTheme.typography.bodyMedium)
-            Text(dir?.let { "工作目录：${it.name}\n${it.path}" } ?: "未绑定工作目录", style = MaterialTheme.typography.bodyMedium)
-        }
-    }, confirmButton = { TextButton({ details = false }) { Text("完成") } })
+    if (models) ModelPicker(state, actions) { models = false }
+    if (devices) DevicePicker(state, actions) { devices = false }
 }
 
 @Composable private fun TurnView(turn: ChatTurn, state: UiState, actions: UiActions) {
     when (turn.role) {
-        "user" -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(20.dp), modifier = Modifier.widthIn(max = 620.dp)) {
+        "user" -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            MessageAttachments(turn.attachments + turn.messages.filter { it.type == "attachments" }.flatMap { it.attachments() })
+            if (turn.text.isNotBlank()) Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(20.dp), modifier = Modifier.widthIn(max = 620.dp)) {
                 SelectionContainer { Text(turn.text, Modifier.padding(horizontal = 16.dp, vertical = 12.dp), color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.bodyLarge) }
             }
         }
@@ -174,6 +184,7 @@ import kotlinx.coroutines.launch
                 "tool" -> ToolCard(block, state, actions, allowDecisions)
                 "error" -> ErrorCard(block.content)
                 "notice" -> if (block.content.isNotBlank()) NoticeCard(block.content)
+                "attachments" -> MessageAttachments(block.attachments())
                 else -> CollapsibleDetail("消息详情 · ${block.type}", block.raw.toString(), Icons.Default.Info)
             }
         } }

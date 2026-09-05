@@ -1,4 +1,26 @@
-# v0.2.0 验证记录
+# v0.2.1 验证记录
+
+2026-09-05；客户端更新，通知 logo、聊天附件上传、设备与模型选择。
+
+## 自动回归
+
+- `testDebugUnitTest`：46 项通过。新增官方模型／设备／ACP REST 合约、实际 TLS WebSocket 携带文件 data URL / MIME / 文件名 / model_id / workspace_target_id、仅发送附件和断线不重放、附件内存上限与会话隔离、设备在线／目录绑定规则、附件历史解析。
+- `connectedDebugAndroidTest`：API 36.1 手机模拟器，19 项全部通过。新增真实 ContentResolver 二进制／空文件读取、超限拒绝、已删除文件读取失败；系统 OpenDocument 多选 Intent 及真实 MainActivity 返回回调；附件与模型／设备按会话恢复、迟到文件选择隔离；ACP 切换失败不假报成功、刷新和成功切换。
+- Compose 回归验证附件卡片、移除／读取失败重试、无文字发送、模型搜索／选中、设备选择／离线不可选，以及既有登录记住、聊天空 error、导航和深色主题。
+- 通知服务回归检查系统实际收到的等待／结果／锁屏通用通知，包含官方两种紫色的 large icon，仍保留单色 small icon、通用错误文案和可见性。通知栏截图使用模拟失败事件，截图中的错误提醒是测试样例。
+- 320×600 dp 窄屏：附件与选择器 2 项回归通过；发现键盘遮挡弹窗按钮后，显式应用 IME insets、列表按剩余高度滚动、选中后关闭键盘，最终模型／设备选择器专项复测 1 项通过，并核对截图中搜索时“刷新／完成”可见。相关截图为 `screenshots/ime-final/`。
+- `lintDebug` / `lintRelease`：各 0 errors、22 warnings（沿用依赖／target API／KTX 建议及测试 SDK 版本条件建议）。
+- 最终 R8 / 资源收缩 / Release 构建与签名验证通过，包名 `icu.minq.memoh`、versionCode 5，沿用旧发布证书。在 API36.1 模拟器上从 0.2.0 / 4 直接 `adb install -r` 升级至 0.2.1 / 5，冷启动返回 `Status: ok`。
+
+## 范围
+
+- 接口依据本地官方 Memoh `67fe0e6` 的 `useComposerAttachments.ts`、`useChat.ws.ts`、`useAgentModelCatalog.ts`、`chat-pane.vue`、`workspace-target.ts` 和 SDK / Go handlers 核对。
+- 文件作为聊天附件随消息提交，无独立 HTTP 上传进度百分比；客户端显示读取、就绪、读取失败、提交和等待回复状态。最多 10 个文件、合计 8 MB；附件及选择仅在进程内保存。
+- 已绑定工作目录的会话不覆盖 `workspace_target_id`，Agent 会话由 Agent 配置决定设备。列表依赖服务器 API 与账户权限，无法读取时明确提示并提供刷新。
+- 本轮没有向用户真实 Agent 发送测试任务。网络与选择回归使用模拟 API / TLS WebSocket；不把这些结果表述为所有部署、模型文件理解能力或厂商后台策略均已验证。
+- 文件管理器、文件夹上传、附件下载／图片预览、交互式 user-input、历史分页和多并发 pending 未包含在本轮。
+
+# v0.2.0 验证记录（上一版）
 
 2026-09-05；本次修改原生 Android 客户端，没有更新 Memoh 服务端。
 

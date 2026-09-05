@@ -11,6 +11,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.KSerializer
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import okhttp3.*
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -61,6 +62,12 @@ class MemohApi(val client: OkHttpClient, val json: Json, private val tokenStore:
     suspend fun sessions(botId: String): List<Session> = get("bots/$botId/sessions?types=chat,discuss,acp_agent&limit=50", ItemsResponse.serializer(Session.serializer())).items
     suspend fun session(botId: String, sessionId: String): Session = get("bots/$botId/sessions/$sessionId", Session.serializer())
     suspend fun history(botId: String, sessionId: String): List<ChatTurn> = get("bots/$botId/messages?session_id=$sessionId&limit=50", HistoryResponse.serializer()).items
+    suspend fun workspaceTargets(botId: String): List<WorkspaceTarget> = get("bots/$botId/workspace-targets", WorkspaceTargets.serializer()).targets.filter { it.targetId.isNotBlank() && it.kind.isNotBlank() }
+    suspend fun models(): List<ChatModel> = get("models", ListSerializer(ChatModel.serializer())).filter { it.id.isNotBlank() && it.type == "chat" && it.enable }
+    suspend fun agentModels(botId: String, agentId: String): ExternalModels = get("bots/$botId/agents/$agentId/models", ExternalModels.serializer())
+    suspend fun ensureACPRuntime(botId: String, sessionId: String): ACPRuntime = json.decodeFromString(ACPRuntime.serializer(), authenticated("bots/$botId/sessions/$sessionId/acp-runtime", "POST", null))
+    suspend fun setACPModel(botId: String, sessionId: String, modelId: String): ACPRuntime = json.decodeFromString(ACPRuntime.serializer(), authenticated(
+        "bots/$botId/sessions/$sessionId/acp-runtime/model", "PATCH", json.encodeToString(ModelSelection.serializer(), ModelSelection(modelId)).toRequestBody(media)))
 
     suspend fun createSession(botId: String, title: String, workdirId: String?, settings: BotSettings): Session {
         val runtime = settings.chatRuntime.trim().ifEmpty { "model" }
@@ -163,6 +170,7 @@ class MemohApi(val client: OkHttpClient, val json: Json, private val tokenStore:
         return when (method) {
             "GET" -> builder.get().build()
             "POST" -> builder.post(body ?: ByteArray(0).toRequestBody(media)).build()
+            "PATCH" -> builder.patch(body ?: ByteArray(0).toRequestBody(media)).build()
             else -> error("Unsupported method")
         }
     }

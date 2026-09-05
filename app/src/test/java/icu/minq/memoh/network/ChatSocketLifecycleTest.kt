@@ -2,8 +2,9 @@ package icu.minq.memoh.network
 
 import icu.minq.memoh.model.AuthMaterial
 import icu.minq.memoh.model.RuntimeState
+import icu.minq.memoh.model.ChatAttachment
 import icu.minq.memoh.security.AuthStore
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.*
 import okhttp3.*
 import okhttp3.mockwebserver.*
 import okhttp3.tls.HandshakeCertificates
@@ -13,6 +14,7 @@ import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /** Exercises the actual actor and transport; callbacks are synchronous only in this JVM harness. */
 class ChatSocketLifecycleTest {
@@ -41,6 +43,7 @@ class ChatSocketLifecycleTest {
             val opens = AtomicInteger(); val messages = AtomicInteger()
             val connectedTwice = CountDownLatch(2)
             val delivered = CountDownLatch(1)
+            val payload = AtomicReference<JsonObject>()
             val firstConnected = CountDownLatch(1)
             repeat(3) {
                 server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
@@ -48,6 +51,7 @@ class ChatSocketLifecycleTest {
                     override fun onMessage(webSocket: WebSocket, text: String) {
                         if (text.contains("runtime_subscribe")) webSocket.send(snapshot())
                         if (text.contains("\"type\":\"message\"")) {
+                            payload.set(Json.parseToJsonElement(text).jsonObject)
                             messages.incrementAndGet(); delivered.countDown()
                             webSocket.close(1001, "restart before acceptance")
                         }
@@ -67,8 +71,16 @@ class ChatSocketLifecycleTest {
             try {
                 socket.connect(); socket.connect() // Duplicate connect is coalesced.
                 assertTrue(firstConnected.await(5, TimeUnit.SECONDS))
-                socket.sendMessage("one prompt", "i")
+                socket.sendMessage("", "i", listOf(ChatAttachment(name = "notes.txt", mime = "text/plain", base64 = "data:text/plain;base64,aGVsbG8=")), "model-picked", "remote:computer")
                 assertTrue(delivered.await(5, TimeUnit.SECONDS))
+                assertEquals("model-picked", payload.get()["model_id"]!!.jsonPrimitive.content)
+                assertEquals("remote:computer", payload.get()["workspace_target_id"]!!.jsonPrimitive.content)
+                assertEquals("", payload.get()["text"]!!.jsonPrimitive.content)
+                val attachment = payload.get()["attachments"]!!.jsonArray.single().jsonObject
+                assertEquals("file", attachment["type"]!!.jsonPrimitive.content)
+                assertEquals("text/plain", attachment["mime"]!!.jsonPrimitive.content)
+                assertEquals("notes.txt", attachment["name"]!!.jsonPrimitive.content)
+                assertEquals("data:text/plain;base64,aGVsbG8=", attachment["base64"]!!.jsonPrimitive.content)
                 assertTrue(connectedTwice.await(8, TimeUnit.SECONDS))
                 assertEquals(2, opens.get())
                 assertEquals(1, messages.get())

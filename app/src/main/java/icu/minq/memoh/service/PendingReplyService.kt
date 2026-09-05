@@ -8,6 +8,8 @@ import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import icu.minq.memoh.MainActivity
 import icu.minq.memoh.MemohApplication
 import icu.minq.memoh.R
@@ -29,6 +31,10 @@ class PendingReplyService : Service() {
     private var disconnectedAt: Long? = null
     private val notifiedDecisions = mutableSetOf<String>()
     private val container get() = (application as MemohApplication).container
+    private val notificationLogo by lazy {
+        val size = (64 * resources.displayMetrics.density).toInt().coerceAtLeast(1)
+        requireNotNull(ContextCompat.getDrawable(this, R.drawable.ic_memoh)).toBitmap(size, size)
+    }
 
     override fun onCreate() { super.onCreate(); createChannels() }
     override fun onBind(intent: Intent?): IBinder? = null
@@ -139,18 +145,21 @@ class PendingReplyService : Service() {
         super.onDestroy()
     }
 
-    private fun ongoingNotification(operation: ActiveOperation): Notification = NotificationCompat.Builder(this, CHANNEL_PENDING)
-        .setSmallIcon(R.drawable.ic_notification).setContentTitle("Memoh")
+    private fun notificationBuilder(channel: String) = NotificationCompat.Builder(this, channel)
+        .setSmallIcon(R.drawable.ic_notification)
+        .setLargeIcon(notificationLogo)
+        .setContentTitle("Memoh")
+
+    private fun ongoingNotification(operation: ActiveOperation): Notification = notificationBuilder(CHANNEL_PENDING)
         .setContentText(getString(R.string.pending_notification)).setOngoing(true).setOnlyAlertOnce(true)
         .setVisibility(NotificationCompat.VISIBILITY_SECRET).setCategory(NotificationCompat.CATEGORY_SERVICE)
         .setContentIntent(contentIntent(operation)).build()
 
     private fun notifyResult(operation: ActiveOperation, text: String) {
-        val notification = NotificationCompat.Builder(this, CHANNEL_RESULT).setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Memoh").setContentText(text).setAutoCancel(true)
+        val notification = notificationBuilder(CHANNEL_RESULT)
+            .setContentText(text).setAutoCancel(true)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .setPublicVersion(NotificationCompat.Builder(this, CHANNEL_RESULT).setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle("Memoh").setContentText("有新的状态更新").build())
+            .setPublicVersion(notificationBuilder(CHANNEL_RESULT).setContentText("有新的状态更新").build())
             .setContentIntent(contentIntent(operation)).build()
         // Permission denial cannot keep a foreground monitor alive or crash the completion path.
         runCatching { (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(RESULT_ID_BASE + (operation.pending.invocationId.hashCode() and 0x0fffffff), notification) }

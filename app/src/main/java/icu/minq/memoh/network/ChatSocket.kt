@@ -67,12 +67,16 @@ class ChatSocket(
     fun connect() = post { connectSerial(WebSocketAuthMode.HEADER) }
     fun isUsable(): Boolean = usable && !closed
 
-    fun sendMessage(text: String, invocationId: String = UUID.randomUUID().toString(), onQueued: (Boolean) -> Unit = {}) {
+    fun sendMessage(text: String, invocationId: String = UUID.randomUUID().toString(),
+        attachments: List<ChatAttachment> = emptyList(), modelId: String = "", workspaceTargetId: String = "",
+        onQueued: (Boolean) -> Unit = {}) {
         if (closed) { dispatch { onQueued(false) }; return }
         runCatching { serial.execute {
             val sent = if (!isUsable() || api.authEpoch != expectedEpoch) false else socket?.send(buildJsonObject {
                 put("type", "message"); put("invocation_id", invocationId); put("session_id", sessionId); put("text", text)
-                putJsonArray("attachments") {}
+                putJsonArray("attachments") { attachments.forEach { add(api.json.encodeToJsonElement(ChatAttachment.serializer(), it)) } }
+                if (modelId.isNotBlank()) put("model_id", modelId)
+                if (workspaceTargetId.isNotBlank()) put("workspace_target_id", workspaceTargetId)
             }.toString()) == true
             // Report rejection even when screen-close races the actor; never strand the composer gate.
             // Once OkHttp accepts a frame, delivery may be uncertain. Never retain/replay its text.

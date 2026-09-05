@@ -6,8 +6,10 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.os.Build
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -25,6 +27,7 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class PendingServiceTest {
@@ -36,6 +39,12 @@ class PendingServiceTest {
                 ContextCompat.startForegroundService(it, PendingReplyService.intent(it, pending))
             }
             awaitCondition { PendingReplyService.isMonitoring(pending) }
+            val manager = application.getSystemService(NotificationManager::class.java)
+            awaitCondition { manager.activeNotifications.any { it.id == 1001 } }
+            val ongoing = manager.activeNotifications.first { it.id == 1001 }.notification
+            assertBranding(application, ongoing)
+            assertEquals(Notification.VISIBILITY_SECRET, ongoing.visibility)
+            captureNotification("notification-waiting")
             scenario.onActivity { ContextCompat.startForegroundService(it, PendingReplyService.intent(it, pending.copy(invocationId = "stale-id"))) }
             delay(150)
             assertTrue(PendingReplyService.isMonitoring(pending))
@@ -48,6 +57,12 @@ class PendingServiceTest {
             assertNotNull(result)
             assertEquals("Memoh 回复出错或已停止，请打开应用查看", result!!.notification.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
             assertFalse(result.notification.extras.toString().contains("PRIVATE_TOKEN"))
+            assertBranding(application, result.notification)
+            assertEquals(Notification.VISIBILITY_PRIVATE, result.notification.visibility)
+            assertNotNull(result.notification.publicVersion)
+            assertBranding(application, result.notification.publicVersion)
+            assertEquals("有新的状态更新", result.notification.publicVersion.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+            captureNotification("notification-result")
         }
     }
 
@@ -61,6 +76,42 @@ class PendingServiceTest {
             awaitCondition { store.read()?.phase == PendingPhase.UNKNOWN && !serviceRunning(application) }
             assertEquals(pending.invocationId, store.read()?.invocationId)
             assertFalse(store.read()!!.monitoring)
+            val result = application.getSystemService(NotificationManager::class.java).activeNotifications
+                .first { it.id == 2000 + (pending.invocationId.hashCode() and 0x0fffffff) }.notification
+            assertBranding(application, result)
+        }
+    }
+
+    private fun assertBranding(context: Context, notification: Notification) {
+        assertEquals(R.drawable.ic_notification, notification.smallIcon.resId)
+        assertNotNull("Notification card must include the color logo", notification.getLargeIcon())
+        val bitmap = notification.getLargeIcon().loadDrawable(context)!!.toBitmap(128, 128)
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        assertTrue("Logo must retain its light purple", pixels.count { it == 0xffbd69ff.toInt() } > 20)
+        assertTrue("Logo must retain its dark purple", pixels.count { it == 0xff7948ff.toInt() } > 20)
+    }
+
+    private suspend fun captureNotification(name: String) {
+        val arguments = InstrumentationRegistry.getArguments()
+        if (arguments.getString("captureNotificationScreenshots") != "true") return
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        try {
+            // Foreground-service cards can be deferred by System UI; capture after that window.
+            if (name.endsWith("waiting")) delay(10_000)
+            automation.executeShellCommand("cmd statusbar expand-notifications").use { descriptor ->
+                java.io.FileInputStream(descriptor.fileDescriptor).readBytes()
+            }
+            delay(5_000)
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val dir = arguments.getString("additionalTestOutputDir")?.let(::File) ?: context.getExternalFilesDir("qa")!!
+            dir.mkdirs()
+            val screenshot = requireNotNull(automation.takeScreenshot())
+            File(dir, "$name.png").outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            screenshot.recycle()
+        } finally {
+            automation.executeShellCommand("cmd statusbar collapse").close()
+            delay(1_500)
         }
     }
 
