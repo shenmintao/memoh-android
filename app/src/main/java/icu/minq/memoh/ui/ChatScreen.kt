@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import icu.minq.memoh.data.UiState
 import icu.minq.memoh.data.reconciledHistory
+import icu.minq.memoh.data.pendingDecisions
 import icu.minq.memoh.model.*
 import io.noties.markwon.Markwon
 import kotlinx.coroutines.launch
@@ -97,6 +98,11 @@ import kotlin.math.roundToInt
 
 @Composable private fun Composer(state: UiState, actions: UiActions) {
     val readOnly = state.session.isExternalChannel()
+    val decisions = state.pendingDecisions()
+    if (!readOnly && decisions.isNotEmpty()) {
+        DecisionPanel(state, actions, decisions)
+        return
+    }
     val running = state.runtime.run?.let { !it.isTerminal() } == true
     val canSend = !readOnly && state.connected && state.connectionFailure == null && !running && state.pending?.blocksSend != true && !state.sendInFlight && !state.loading && !state.composer.modelsLoading && !state.composer.modelChanging && !state.composer.modelUncertain && state.attachments.all { it.payload != null }
     val dir = state.workdirs.firstOrNull { it.id == state.session?.workdirId }
@@ -157,7 +163,7 @@ import kotlin.math.roundToInt
             state.connectionFailure != null -> "连接不可用，请重新打开会话"
             !state.connected -> "正在连接服务器…"
             state.pending?.blocksSend == true && !running -> "正在确认上一条消息的状态…"
-            running -> if (state.runtime.run.isWaitingApproval()) "等待你的批准" else "正在回复…"
+            running -> state.runtime.run.waitingLabel()
             else -> dir?.name ?: if (state.session?.canSelectDevice() == true && state.composer.targetId.isNotBlank()) state.composer.targetLabel() else ""
         }
         if (hint.isNotBlank()) Text(hint, Modifier.padding(start = 8.dp, top = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -173,12 +179,12 @@ import kotlin.math.roundToInt
                 SelectionContainer { Text(turn.text, Modifier.padding(horizontal = 16.dp, vertical = 12.dp), color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.bodyLarge) }
             }
         }
-        "assistant" -> AssistantMessage(turn.messages.ifEmpty { if (turn.text.isNotBlank()) listOf(MessageBlock(type = "text", content = turn.text)) else emptyList() }, state, actions, false, allowDecisions = false)
+        "assistant" -> AssistantMessage(turn.messages.ifEmpty { if (turn.text.isNotBlank()) listOf(MessageBlock(type = "text", content = turn.text)) else emptyList() }, state, actions, false)
         else -> NoticeCard(turn.text.ifBlank { "系统消息" })
     }
 }
 
-@Composable private fun AssistantMessage(blocks: List<MessageBlock>, state: UiState, actions: UiActions, streaming: Boolean, allowDecisions: Boolean = true) {
+@Composable private fun AssistantMessage(blocks: List<MessageBlock>, state: UiState, actions: UiActions, streaming: Boolean) {
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -186,7 +192,7 @@ import kotlin.math.roundToInt
             when (block.type) {
                 "text" -> MarkdownText(block.content)
                 "reasoning" -> CollapsibleDetail("思考过程", block.content, Icons.Default.AutoAwesome)
-                "tool" -> ToolCard(block, state, actions, allowDecisions)
+                "tool" -> ToolCard(block, state)
                 "error" -> ErrorCard(block.content)
                 "notice" -> if (block.content.isNotBlank()) NoticeCard(block.content)
                 "attachments" -> MessageAttachments(block.attachments())
@@ -195,7 +201,7 @@ import kotlin.math.roundToInt
         } }
         if (streaming) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
-            Text(if (state.runtime.run.isWaitingApproval()) "等待批准" else "正在思考…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(state.runtime.run.waitingLabel(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else if (blocks.any { it.type == "text" && it.content.isNotBlank() }) {
             IconButton({ clipboard.setText(AnnotatedString(blocks.filter { it.type == "text" }.joinToString("\n\n") { it.content })); copied = true }, Modifier.size(40.dp)) {
                 Icon(if (copied) Icons.Default.Check else Icons.Default.ContentCopy, if (copied) "已复制回复" else "复制回复", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -218,9 +224,7 @@ import kotlin.math.roundToInt
     }
 }
 
-@Composable private fun ToolCard(block: MessageBlock, state: UiState, actions: UiActions, allowDecisions: Boolean) {
-    val approval = block.approval?.takeIf { it.status == "pending" && it.canApprove && allowDecisions }
-    val canDecide = state.connected && state.pendingControls.isEmpty() && !state.session.isExternalChannel()
+@Composable private fun ToolCard(block: MessageBlock, state: UiState) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))) {
         Column(Modifier.fillMaxWidth()) {
@@ -235,22 +239,17 @@ import kotlin.math.roundToInt
                 block.output?.let { Text("结果", style = MaterialTheme.typography.labelMedium); DetailText(it.toString()) }
                 block.progress.takeLast(3).forEach { DetailText(it.toString()) }
             }
-            if (approval != null) Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (state.pendingControls.isNotEmpty()) "正在确认你的选择…" else "需要你的批准", style = MaterialTheme.typography.bodyMedium)
-                if (approval.options.isEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button({ actions.decide(approval.approvalId, true, null) }, enabled = canDecide) { Text("批准") }
-                    OutlinedButton({ actions.decide(approval.approvalId, false, null) }, enabled = canDecide) { Text("拒绝") }
-                } else approval.options.forEach { option ->
-                    val reject = option.kind.startsWith("reject", true)
-                    val label = option.name.ifBlank { when (option.kind) { "allow_once" -> "仅本次允许"; "allow_always" -> "始终允许"; "reject_once" -> "仅本次拒绝"; "reject_always" -> "始终拒绝"; else -> "选择" } }
-                    OutlinedButton({ actions.decide(approval.approvalId, !reject, option.id) }, enabled = canDecide) { Text(label) }
-                }
+            block.approval?.let { approval ->
+                Text(when (approval.status) {
+                    "pending" -> if (state.pendingDecisions().any { it.approval?.approvalId == approval.approvalId }) "批准请求见下方输入区" else "此批准请求已不可操作"
+                    "approved" -> "已批准"; "rejected" -> "已拒绝"; "resolved" -> "请求已处理"; else -> "批准请求已结束"
+                }, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
             }
-            block.userInput?.takeIf { it.status == "pending" }?.let { input ->
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("请在 Memoh 网页端回答以下问题", style = MaterialTheme.typography.bodyMedium)
-                    input.questions.forEach { Text(it.text, style = MaterialTheme.typography.bodyMedium) }
-                }
+            block.userInput?.let { input ->
+                Text(when (input.status) {
+                    "pending" -> if (state.pendingDecisions().any { it.userInput?.userInputId == input.userInputId }) "请在下方输入区回答" else "此回答请求已不可操作"
+                    "submitted" -> "已提交回答"; "canceled" -> "已取消回答"; else -> "回答请求已结束"
+                }, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
             }
         }
     }

@@ -62,7 +62,8 @@ class ChatSocket(
     private var reconnectDelay = 1_000L
     private var reconnect: ScheduledFuture<*>? = null
     private var state = RuntimeState(sessionId = sessionId)
-    private val controls = mutableMapOf<String, ScheduledFuture<*>>()
+    private data class Control(val type: String, val runId: String, val timer: ScheduledFuture<*>)
+    private val controls = mutableMapOf<String, Control>()
 
     fun connect() = post { connectSerial(WebSocketAuthMode.HEADER) }
     fun isUsable(): Boolean = usable && !closed
@@ -86,11 +87,21 @@ class ChatSocket(
     }
 
     fun abort(runId: String): String? = control("abort", runId) { }
-    fun approve(runId: String, approvalId: String, approve: Boolean, optionId: String? = null): String? =
+    fun approve(runId: String, approvalId: String, approve: Boolean, optionId: String? = null, reason: String = ""): String? =
         control("tool_approval_response", runId) {
             put("decision_id", approvalId); put("decision", if (approve) "approve" else "reject")
             optionId?.takeIf { it.isNotBlank() }?.let { put("option_id", it) }
+            reason.trim().takeIf { it.isNotBlank() }?.let { put("reason", it) }
         }
+
+    fun answer(runId: String, inputId: String, answers: List<UserAnswer>, canceled: Boolean): String? =
+        control("user_input_response", runId) {
+            put("decision_id", inputId)
+            if (canceled) { put("canceled", true); put("reason", "user_canceled") }
+            else putJsonArray("answers") { answers.forEach { add(api.json.encodeToJsonElement(UserAnswer.serializer(), it)) } }
+        }
+
+    fun refreshRuntime() = post { if (isUsable()) subscribeSerial() }
 
     private fun control(type: String, runId: String, extras: JsonObjectBuilder.() -> Unit): String? {
         if (!isUsable()) return null
@@ -101,10 +112,10 @@ class ChatSocket(
         post {
             if (!isUsable() || api.authEpoch != expectedEpoch || socket?.send(payload) != true) {
                 notifyMain { listener.onControl(id, false, "connection_lost") }
-            } else controls[id] = serial.schedule({
+            } else controls[id] = Control(type, runId, serial.schedule({
                 controls.remove(id)
                 notifyMain { listener.onControl(id, false, "ack_timeout_status_unknown") }
-            }, 30, TimeUnit.SECONDS)
+            }, 30, TimeUnit.SECONDS))
         }
         return id
     }
@@ -117,7 +128,7 @@ class ChatSocket(
         runCatching { serial.execute {
             attempt++
             reconnect?.cancel(false)
-            controls.values.forEach { it.cancel(false) }; controls.clear()
+            controls.values.forEach { it.timer.cancel(false) }; controls.clear()
             socket?.cancel(); socket = null
             serial.shutdown() // Drain already-enqueued send callbacks so their UI gate is released.
         } }
@@ -204,14 +215,28 @@ class ChatSocket(
 
     private fun handleSerial(text: String) {
         val event = runCatching { api.json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
+        val eventSession = event.string("session_id")
+        if (eventSession.isNotBlank() && eventSession != sessionId) return
         when (event.string("type")) {
             "run_accepted" -> notifyMain { listener.onAccepted(event.string("run_id"), event.string("invocation_id")) }
             "run_rejected" -> notifyMain { listener.onRejected(event.string("invocation_id"), event.string("message").ifBlank { "请求未被接受" }) }
-            "error" -> notifyMain { listener.onRejected(event.string("invocation_id").takeIf { it.isNotBlank() }, event.string("message").ifBlank { "实时请求失败" }) }
+            "error" -> {
+                val matching = controls.filter { (id, control) ->
+                    event.string("session_id") == sessionId && event.string("run_id") == control.runId &&
+                        (event.string("control_id").isBlank() || event.string("control_id") == id)
+                }.keys.toList()
+                if (matching.isNotEmpty() && event.string("invocation_id").isBlank()) matching.forEach { id ->
+                    controls.remove(id)?.timer?.cancel(false)
+                    notifyMain { listener.onControl(id, false, event.string("code").ifBlank { "control_failed" }) }
+                } else notifyMain { listener.onRejected(event.string("invocation_id").takeIf { it.isNotBlank() }, event.string("message").ifBlank { "实时请求失败" }) }
+            }
             "control_ack" -> {
                 val id = event.string("control_id")
-                controls.remove(id)?.cancel(false)
-                notifyMain { listener.onControl(id, event["applied"]?.jsonPrimitive?.booleanOrNull == true, event.string("code").takeIf { it.isNotBlank() }) }
+                val pending = controls[id] ?: return
+                if (event.string("session_id") != sessionId || event.string("run_id") != pending.runId || event.string("control") != pending.type) return
+                val applied = event["applied"]?.jsonPrimitive?.booleanOrNull ?: return
+                controls.remove(id)?.timer?.cancel(false)
+                notifyMain { listener.onControl(id, applied, event.string("code").takeIf { it.isNotBlank() }) }
             }
             "runtime_snapshot" -> {
                 if (event.string("session_id") != sessionId) return
@@ -245,7 +270,7 @@ class ChatSocket(
         connecting = false
         socket = null
         usable = false
-        controls.forEach { (id, timer) -> timer.cancel(false); notifyMain { listener.onControl(id, false, "connection_lost_status_unknown") } }
+        controls.forEach { (id, control) -> control.timer.cancel(false); notifyMain { listener.onControl(id, false, "connection_lost_status_unknown") } }
         controls.clear()
         notifyMain { listener.onConnection(false) }
     }

@@ -8,6 +8,8 @@ import icu.minq.memoh.model.RuntimeState
 object RuntimeReducer {
     fun snapshot(state: RuntimeState, eventSessionId: String, eventEpoch: String, eventSeq: Long, snapshot: RuntimeSnapshot): RuntimeState {
         if (snapshot.session_id != eventSessionId || snapshot.epoch != eventEpoch || snapshot.seq != eventSeq) return state.copy(needsSnapshot = true)
+        // Re-subscriptions may overlap; an older snapshot must not resurrect a settled decision/run.
+        if (state.sessionId == eventSessionId && state.epoch == eventEpoch && eventSeq < state.seq) return state
         return RuntimeState(eventSessionId, eventEpoch, eventSeq, snapshot.current_run_view, false)
     }
 

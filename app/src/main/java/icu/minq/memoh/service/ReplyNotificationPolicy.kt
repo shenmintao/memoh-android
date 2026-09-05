@@ -1,7 +1,7 @@
 package icu.minq.memoh.service
 
 import icu.minq.memoh.data.PendingPhase
-import icu.minq.memoh.model.RuntimeRun
+import icu.minq.memoh.model.*
 
 /** No server-supplied text ever enters a system notification. */
 object ReplyNotificationPolicy {
@@ -10,8 +10,8 @@ object ReplyNotificationPolicy {
         PendingPhase.FAILED -> "Memoh 回复出错或已停止，请打开应用查看"
         else -> "后台监听已暂停，执行结果尚未确认，请打开应用查看"
     }
-    fun decisionIds(run: RuntimeRun): Set<String> = run.messages.mapNotNull { block ->
-        block.approval?.takeIf { it.status == "pending" }?.let { "approval:${it.approvalId}" }
-            ?: block.userInput?.takeIf { it.status == "pending" }?.let { "input:${it.userInputId}" }
+    fun decisionIds(run: RuntimeRun): Set<String> = if (run.isTerminal()) emptySet() else run.messages.mapNotNull { block ->
+        block.approval?.takeIf { it.canDecide() }?.let { "approval:${it.approvalId}" }
+            ?: block.userInput?.takeIf { it.canAnswer() }?.let { "input:${it.userInputId}" }
     }.toSet()
 }

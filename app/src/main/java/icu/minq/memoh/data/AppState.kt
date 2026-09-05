@@ -40,6 +40,7 @@ data class UiState(
     val connectionFailure: String? = null,
     val pending: PendingOperation? = null,
     val pendingControls: Set<String> = emptySet(),
+    val resolvedDecisions: Set<String> = emptySet(),
     val draft: String = "",
     val sendInFlight: Boolean = false,
     val rememberedLogin: RememberedLogin? = null,
@@ -59,7 +60,9 @@ class AppState(application: Application, private val container: AppContainer, pr
     private var authGeneration = 0L
     private var bootstrapped = false
     private var terminalReconciliationKey: String? = null
-    private val controls = mutableMapOf<String, String>()
+    private data class TrackedControl(val description: String, val runId: String, val receipt: DecisionReceipt? = null)
+    private val controls = mutableMapOf<String, TrackedControl>()
+    private val confirmedDecisions = mutableMapOf<String, DecisionReceipt>()
     private val drafts = DraftStore()
     private val attachments = AttachmentDraftStore()
     private val attachmentReader = AttachmentReader(application.contentResolver)
@@ -221,12 +224,12 @@ class AppState(application: Application, private val container: AppContainer, pr
         if (!isCurrent(generation, auth)) return
         chatSocket?.close()
         historyJob?.cancel(); terminalReconciliationKey = null
-        controls.clear()
+        controls.clear(); confirmedDecisions.clear()
         val remembered = container.modelSelectionStore.read(modelSelectionKey(bot, session))
         acpSelectionToRestore = remembered.takeIf { session.runtimeType == "acp_agent" || session.type == "acp_agent" }
         mutable.value = mutable.value.copy(screen = Screen.Chat, session = session, history = history,
             runtime = RuntimeState(sessionId = session.id), connected = false, connectionFailure = null,
-            pendingControls = emptySet(), draft = drafts.get(draftKey(bot.id, session.id)),
+            pendingControls = emptySet(), resolvedDecisions = emptySet(), draft = drafts.get(draftKey(bot.id, session.id)),
             attachments = attachments.get(draftKey(bot.id, session.id)), composer = ComposerConfig(
                 modelId = remembered?.modelId ?: if (session.type == "subagent") session.metadataString("model_uuid") else "",
                 defaultModelId = if (session.isAgentRuntime()) "" else mutable.value.settings.chatModelId.orEmpty(),
@@ -240,7 +243,17 @@ class AppState(application: Application, private val container: AppContainer, pr
             private fun active() = chatSocket === candidate && authGeneration == auth && mutable.value.session?.id == session.id
             override fun onRuntime(state: RuntimeState) {
                 if (!active()) return
-                mutable.value = mutable.value.copy(runtime = state)
+                confirmedDecisions.entries.removeAll { state.run == null || state.run.run_id != it.value.runId || state.run.isTerminal() }
+                controls.entries.removeAll { (_, control) ->
+                    val ended = state.run == null || state.run.run_id != control.runId || state.run.isTerminal()
+                    val resolved = control.receipt?.unresolved(state.run) == false
+                    if (!ended && resolved) control.receipt?.let { receipt ->
+                        confirmedDecisions["${receipt.kind}:${receipt.id}"] = receipt.copy(status = "resolved")
+                    }
+                    ended || resolved
+                }
+                val projected = confirmedDecisions.values.fold(state.run) { run, receipt -> receipt.apply(run) }
+                mutable.value = mutable.value.copy(runtime = state.copy(run = projected), pendingControls = controls.keys.toSet(), resolvedDecisions = confirmedDecisions.keys.toSet())
                 container.pendingStore.observe(accountKey, bot.id, session.id, state.run)
                 if (!state.run.isTerminal()) {
                     terminalReconciliationKey = null; historyJob?.cancel()
@@ -271,9 +284,19 @@ class AppState(application: Application, private val container: AppContainer, pr
             }
             override fun onControl(controlId: String, applied: Boolean, code: String?) {
                 if (!active()) return
-                val description = controls.remove(controlId) ?: return
+                val control = controls.remove(controlId) ?: return
                 mutable.value = mutable.value.copy(pendingControls = controls.keys.toSet())
-                if (!applied) mutable.value = mutable.value.copy(error = "$description 未确认，请查看最新状态${code?.let { "（$it）" }.orEmpty()}")
+                if (applied || code.isNullOrBlank()) {
+                    control.receipt?.let { receipt ->
+                        val resolved = if (applied) receipt else receipt.copy(status = "resolved")
+                        confirmedDecisions["${receipt.kind}:${receipt.id}"] = resolved
+                        mutable.value = mutable.value.copy(runtime = mutable.value.runtime.copy(run = resolved.apply(mutable.value.runtime.run)), resolvedDecisions = confirmedDecisions.keys.toSet())
+                    }
+                    candidate.refreshRuntime()
+                } else {
+                    mutable.value = mutable.value.copy(error = "${control.description}未确认，请查看最新状态后重试（$code）")
+                    candidate.refreshRuntime()
+                }
             }
             override fun onConnection(connected: Boolean) {
                 if (active()) mutable.value = mutable.value.copy(connected = connected, connectionFailure = if (connected) null else mutable.value.connectionFailure)
@@ -620,14 +643,30 @@ class AppState(application: Application, private val container: AppContainer, pr
         val controlId = chatSocket?.abort(id)
         if (controlId == null) mutable.value = mutable.value.copy(error = "实时连接已断开") else trackControl(controlId, "停止请求")
     }
-    fun decide(approvalId: String, approve: Boolean, optionId: String?) {
-        if (mutable.value.session.isExternalChannel() || mutable.value.pendingControls.isNotEmpty()) return
-        val run = mutable.value.runtime.run ?: return
-        val controlId = chatSocket?.approve(run.run_id, approvalId, approve, optionId)
-        if (controlId == null) mutable.value = mutable.value.copy(error = "实时连接已断开") else trackControl(controlId, if (approve) "批准请求" else "拒绝请求")
+    fun decide(approvalId: String, approve: Boolean, optionId: String?, reason: String = "") {
+        val value = mutable.value
+        if (value.loading || value.session.isExternalChannel() || value.pendingControls.isNotEmpty()) return
+        val run = value.runtime.run ?: return
+        val approval = value.pendingDecisions().mapNotNull { it.approval }.firstOrNull { it.approvalId == approvalId && it.canDecide() } ?: return
+        val options = approval.options.filter { it.id.isNotBlank() }
+        if (optionId != null && options.none { it.id == optionId && it.approves() == approve }) return
+        if (approve && options.isNotEmpty() && optionId == null) return
+        val controlId = chatSocket?.approve(run.run_id, approvalId, approve, optionId, reason)
+        if (controlId == null) mutable.value = mutable.value.copy(error = "实时连接已断开")
+        else trackControl(controlId, if (approve) "批准请求" else "拒绝请求", DecisionReceipt(run.run_id, approvalId, "approval", if (approve) "approved" else "rejected", optionId))
     }
-    private fun trackControl(controlId: String, description: String) {
-        controls[controlId] = description
+    fun answer(inputId: String, answers: List<UserAnswer>, canceled: Boolean) {
+        val value = mutable.value
+        if (value.loading || value.session.isExternalChannel() || value.pendingControls.isNotEmpty()) return
+        val run = value.runtime.run ?: return
+        val input = value.pendingDecisions().mapNotNull { it.userInput }.firstOrNull { it.userInputId == inputId && it.canAnswer() } ?: return
+        if (!canceled && !input.accepts(answers)) { mutable.value = mutable.value.copy(error = "请完成必填问题后提交"); return }
+        val controlId = chatSocket?.answer(run.run_id, inputId, answers, canceled)
+        if (controlId == null) mutable.value = mutable.value.copy(error = "实时连接已断开")
+        else trackControl(controlId, if (canceled) "取消回答" else "提交回答", DecisionReceipt(run.run_id, inputId, "input", if (canceled) "canceled" else "submitted"))
+    }
+    private fun trackControl(controlId: String, description: String, receipt: DecisionReceipt? = null) {
+        controls[controlId] = TrackedControl(description, mutable.value.runtime.run?.run_id.orEmpty(), receipt)
         mutable.value = mutable.value.copy(pendingControls = controls.keys.toSet())
     }
 
@@ -640,8 +679,8 @@ class AppState(application: Application, private val container: AppContainer, pr
             Screen.Chat -> {
                 chatSocket?.close(); chatSocket = null
                 savedState[KEY_SESSION] = ""
-                controls.clear()
-                mutable.value = mutable.value.copy(screen = Screen.Sessions, session = null, history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null, pendingControls = emptySet(), draft = "", attachments = emptyList(), composer = ComposerConfig())
+                controls.clear(); confirmedDecisions.clear()
+                mutable.value = mutable.value.copy(screen = Screen.Sessions, session = null, history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null, pendingControls = emptySet(), resolvedDecisions = emptySet(), draft = "", attachments = emptyList(), composer = ComposerConfig())
             }
             Screen.Sessions -> {
                 savedState[KEY_BOT] = ""; savedState[KEY_SESSION] = ""
@@ -664,7 +703,7 @@ class AppState(application: Application, private val container: AppContainer, pr
         recoverySocket?.close(); recoverySocket = null
         getApplication<Application>().stopService(android.content.Intent(getApplication(), PendingReplyService::class.java))
         container.pendingStore.clear()
-        drafts.clear(); controls.clear(); accountKey = ""
+        drafts.clear(); controls.clear(); confirmedDecisions.clear(); accountKey = ""
         modelsJob?.cancel(); targetsJob?.cancel(); modelVersion++; targetVersion++
         attachmentJobs.values.toList().forEach { it.cancel() }; attachmentJobs.clear(); attachments.clear(); pickerContext = null
         acpSelectionToRestore = null; targetSelections.clear()
@@ -692,14 +731,14 @@ class AppState(application: Application, private val container: AppContainer, pr
     }
     private fun commitBot(bot: Bot, resources: BotResources) {
         chatSocket?.close(); chatSocket = null
-        historyJob?.cancel(); terminalReconciliationKey = null; controls.clear()
+        historyJob?.cancel(); terminalReconciliationKey = null; controls.clear(); confirmedDecisions.clear()
         modelsJob?.cancel(); targetsJob?.cancel(); modelVersion++; targetVersion++
         savedState[KEY_BOT] = bot.id; savedState[KEY_SESSION] = ""
         mutable.value = mutable.value.copy(screen = Screen.Sessions, bot = bot, settings = resources.settings,
             settingsAvailable = resources.settingsAvailable, workdirs = resources.workdirs,
             workdirsAvailable = resources.workdirsAvailable, sessions = resources.sessions, session = null,
             history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null,
-            pendingControls = emptySet(), draft = "", attachments = emptyList(), composer = ComposerConfig())
+            pendingControls = emptySet(), resolvedDecisions = emptySet(), draft = "", attachments = emptyList(), composer = ComposerConfig())
     }
     private fun refreshHistoryAfterTerminal(botId: String, sessionId: String, auth: Long, key: String) = viewModelScope.launch {
         try {

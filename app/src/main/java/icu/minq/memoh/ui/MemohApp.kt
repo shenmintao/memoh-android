@@ -37,7 +37,7 @@ internal data class UiActions(
     val createSession: (String, String?) -> Unit = { _, _ -> },
     val refreshBots: () -> Unit = {}, val refreshSessions: () -> Unit = {},
     val editDraft: (String) -> Unit = {}, val send: (String) -> Unit = {}, val stop: () -> Unit = {},
-    val decide: (String, Boolean, String?) -> Unit = { _, _, _ -> },
+    val decide: (String, Boolean, String?, String) -> Unit = { _, _, _, _ -> },
     val showBots: () -> Unit = {}, val logout: () -> Unit = {}, val clearError: () -> Unit = {},
     val openPending: () -> Unit = {}, val resumePending: () -> Unit = {}, val acknowledgeUnknown: (String) -> Unit = {},
     val forgetLogin: () -> Unit = {},
@@ -45,6 +45,7 @@ internal data class UiActions(
     val refreshModels: () -> Unit = {}, val selectModel: (String) -> Unit = {},
     val refreshDevices: () -> Unit = {}, val selectDevice: (String) -> Unit = {},
     val selectReasoning: (String) -> Unit = {},
+    val answer: (String, List<UserAnswer>, Boolean) -> Unit = { _, _, _ -> },
 )
 
 @Composable fun MemohApp(app: AppState, startVisibleSend: (() -> Unit) -> Unit) {
@@ -55,7 +56,7 @@ internal data class UiActions(
         app::stop, app::decide, app::showBots, app::logout, app::clearError, app::openPending, app::resumePending, app::acknowledgeUnknown, app::forgetLogin,
         chooseFiles = { if (app.beginFileSelection()) runCatching { files.launch(arrayOf("*/*")) }.onFailure { app.filePickerUnavailable() } },
         removeAttachment = app::removeAttachment, retryAttachment = app::retryAttachment,
-        refreshModels = app::refreshModels, selectModel = app::selectModel, refreshDevices = app::refreshDevices, selectDevice = app::selectDevice, selectReasoning = app::selectReasoning))
+        refreshModels = app::refreshModels, selectModel = app::selectModel, refreshDevices = app::refreshDevices, selectDevice = app::selectDevice, selectReasoning = app::selectReasoning, answer = app::answer))
 }
 
 private class OpenChatDocuments : ActivityResultContracts.OpenMultipleDocuments() {

@@ -54,4 +54,13 @@ class RuntimeReducerTest {
         val initial = RuntimeReducer.snapshot(RuntimeState(), "session-1", "epoch-1", 4, snapshot)
         assertTrue(RuntimeReducer.delta(initial, "session-1", "epoch-2", 5, RuntimeDelta()).needsSnapshot)
     }
+    @Test fun `older snapshot cannot reopen a completed run but a new epoch can replace it`() {
+        val initial = RuntimeReducer.snapshot(RuntimeState(), "session-1", "epoch-1", 4, snapshot)
+        val completed = RuntimeReducer.delta(initial, "session-1", "epoch-1", 5, RuntimeDelta(run = RunPatch("run-1", status = "completed")))
+        assertEquals(completed, RuntimeReducer.snapshot(completed, "session-1", "epoch-1", 4, snapshot))
+        val restarted = RuntimeReducer.snapshot(completed, "session-1", "epoch-2", 0, snapshot.copy(epoch = "epoch-2", seq = 0))
+        assertEquals("running", restarted.run?.status)
+        assertEquals("epoch-2", restarted.epoch)
+    }
+
 }

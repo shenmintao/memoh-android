@@ -11,7 +11,7 @@ class RuntimeStatusTest {
     }
 
     @Test fun `waiting decision or pending approval is detected`() {
-        assertTrue(RuntimeRun("r", "t", status = "waiting_decision").isWaitingApproval())
+        assertEquals("等待处理请求", RuntimeRun("r", "t", status = "waiting_decision").waitingLabel())
         val approval = Approval("approval-1", "pending", canApprove = true)
         assertTrue(RuntimeRun("r", "t", status = "running", messages = listOf(MessageBlock(1, "tool", approval = approval))).isWaitingApproval())
         assertFalse(RuntimeRun("r", "t", status = "running").isWaitingApproval())
