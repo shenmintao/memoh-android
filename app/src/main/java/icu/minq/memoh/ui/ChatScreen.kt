@@ -47,7 +47,9 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 @Composable internal fun ChatScreen(state: UiState, actions: UiActions) {
-    key(state.session?.id) {
+    key(state.bot?.id, state.session?.id) {
+        var expandedTool by rememberSaveable { mutableStateOf<String?>(null) }
+        val toggleTool: (String) -> Unit = { id -> expandedTool = if (expandedTool == id) null else id }
         val live = state.runtime.run
         val settled = remember(state.history, live?.turn_id, live?.request_user_turn) { reconciledHistory(state.history, live) }
         val list = rememberLazyListState()
@@ -75,11 +77,14 @@ import kotlin.math.roundToInt
             } else {
                 Box(Modifier.weight(1f).widthIn(max = 840.dp).fillMaxWidth()) {
                     LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                        itemsIndexed(settled, key = { index, turn -> "${turn.id ?: turn.turnId}:${turn.role}:$index" }) { _, turn -> TurnView(turn, state, actions) }
+                        itemsIndexed(settled, key = { index, turn -> "${turn.id ?: turn.turnId}:${turn.role}:$index" }) { index, turn ->
+                            TurnView(turn, state, actions, turn.turnId.ifBlank { turn.id ?: "history:$index" }, expandedTool, toggleTool)
+                        }
                         live?.let { run -> item("live-${run.run_id}") {
                             Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                                run.request_user_turn?.let { TurnView(it, state, actions) }
-                                AssistantMessage(run.messages, state, actions, running)
+                                val turnKey = run.turn_id.ifBlank { "run:${run.run_id}" }
+                                run.request_user_turn?.let { TurnView(it, state, actions, turnKey, expandedTool, toggleTool) }
+                                AssistantMessage(run.messages, state, actions, running, turnKey, expandedTool, toggleTool)
                                 run.visibleError()?.let { error -> if (run.messages.none { it.type == "error" && it.content.trim() == error }) ErrorCard(error) }
                                 if (run.status == "aborted") Text("已停止生成", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
@@ -171,7 +176,7 @@ import kotlin.math.roundToInt
     if (devices) DevicePicker(state, actions) { devices = false }
 }
 
-@Composable private fun TurnView(turn: ChatTurn, state: UiState, actions: UiActions) {
+@Composable private fun TurnView(turn: ChatTurn, state: UiState, actions: UiActions, turnKey: String, expandedTool: String?, toggleTool: (String) -> Unit) {
     when (turn.role) {
         "user" -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             MessageAttachments(turn.attachments + turn.messages.filter { it.type == "attachments" }.flatMap { it.attachments() })
@@ -179,12 +184,12 @@ import kotlin.math.roundToInt
                 SelectionContainer { Text(turn.text, Modifier.padding(horizontal = 16.dp, vertical = 12.dp), color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.bodyLarge) }
             }
         }
-        "assistant" -> AssistantMessage(turn.messages.ifEmpty { if (turn.text.isNotBlank()) listOf(MessageBlock(type = "text", content = turn.text)) else emptyList() }, state, actions, false)
+        "assistant" -> AssistantMessage(turn.messages.ifEmpty { if (turn.text.isNotBlank()) listOf(MessageBlock(type = "text", content = turn.text)) else emptyList() }, state, actions, false, turnKey, expandedTool, toggleTool)
         else -> NoticeCard(turn.text.ifBlank { "系统消息" })
     }
 }
 
-@Composable private fun AssistantMessage(blocks: List<MessageBlock>, state: UiState, actions: UiActions, streaming: Boolean) {
+@Composable private fun AssistantMessage(blocks: List<MessageBlock>, state: UiState, actions: UiActions, streaming: Boolean, turnKey: String, expandedTool: String?, toggleTool: (String) -> Unit) {
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -192,7 +197,11 @@ import kotlin.math.roundToInt
             when (block.type) {
                 "text" -> MarkdownText(block.content)
                 "reasoning" -> CollapsibleDetail("思考过程", block.content, Icons.Default.AutoAwesome)
-                "tool" -> ToolCard(block, state)
+                "tool" -> {
+                    // Block numbers repeat across turns; tool call IDs survive live-to-history updates.
+                    val toolKey = "${turnKey.length}:$turnKey:${block.toolCallId.ifBlank { "block:${block.id}" }}"
+                    ToolCard(block, state, expandedTool == toolKey) { toggleTool(toolKey) }
+                }
                 "error" -> ErrorCard(block.content)
                 "notice" -> if (block.content.isNotBlank()) NoticeCard(block.content)
                 "attachments" -> MessageAttachments(block.attachments())
@@ -224,11 +233,10 @@ import kotlin.math.roundToInt
     }
 }
 
-@Composable private fun ToolCard(block: MessageBlock, state: UiState) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
+@Composable private fun ToolCard(block: MessageBlock, state: UiState, expanded: Boolean, toggle: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))) {
         Column(Modifier.fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().clickable(onClick = toggle).padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Terminal, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(block.name.ifBlank { "工具调用" }, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (block.running) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
