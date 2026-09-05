@@ -1,6 +1,6 @@
 # Memoh Android
 
-当前发布版本：`0.2.3`（versionCode 7）。修复明细见 [CHANGELOG.md](CHANGELOG.md)。
+当前发布版本：`0.2.4`（versionCode 8）。修复明细见 [CHANGELOG.md](CHANGELOG.md)。
 
 原生 Kotlin / Jetpack Compose 的 Memoh 聊天客户端。应用**不内置任何服务器地址**。首次启动输入 HTTPS URL、用户名和密码；勾选“记住登录信息”后，登录成功时三项一起加密保存在本机，下次打开登录页自动填入。取消勾选会清除记住的信息。退出登录清除会话令牌，但保留用户主动选择记住的登录表单。
 
@@ -21,6 +21,8 @@
 - 输入区电脑图标选择服务器工作区或已授权的在线电脑；设备来自机器人工作区列表，离线设备不可选。已绑定目录的会话由目录决定设备，ACP／Codex／Claude Code 会话由 Agent 配置决定设备。
 - 模型按钮显示“模型名 · 思考强度”，打开输入区上方紧凑浮层，支持搜索、供应商分组与勾选；模型 UUID 不展示。宽屏思考强度采用侧边子菜单，手机在同一浮层内切换并可返回。只显示服务器声明支持的强度档位，换模型后自动校正；原生／直接 Agent 随消息发送 reasoning_effort，ACP 通过专用 PATCH 确认。支持普通聊天模型、直接 Agent 模型和 ACP 动态模型。ACP 切换由服务器确认，失败后可刷新重试；设备／模型选择仅作用于当前会话，不更改机器人的全局默认设置。
 
+- 模型与思考强度按服务器、账号、机器人、会话及运行时保存到本机，重启应用、重新登录后恢复。ACP 恢复等待服务器确认，模型下架时提示并回退；“跟随默认模型”同样会记住。升级到 0.2.4 后需重新选择一次，旧版本已经随进程丢失的选择无法追溯。设备、文字草稿和附件仍只保存在当前进程内。
+
 ## 架构
 
 项目是单 `app` 模块，采用手工依赖容器：
@@ -33,11 +35,12 @@
 - `model/RuntimeFeedback.kt`：空 error 字段不会生成错误提示，errored/lost 仍有失败回退文案。
 - `ui/`：官方风格登录、适配手机／平板的导航、会话和消息组件。
 - `data/AppState.kt`：Compose 可观察 UI 状态、导航加载所有权和历史竞态保护。
+- `data/ModelSelectionStore.kt`：按账号与会话隔离的模型／思考强度偏好，选中时写入本机，进程重启后恢复。
 - `data/PendingOperationStore.kt`：服务与 UI 共享的账户/会话/invocation 状态。
 - `data/DraftStore.kt`：按账户和会话保存的 ViewModel 内存草稿，成功入队后才清除。
 - `service/PendingReplyService.kt`：仅在回复待定时存活的前台监控服务。
 
-首版没有引入 Room，以缩小可工作的构建面。机器人、会话、历史和流式文本仅在内存中，进程死亡后会从服务器重新获取；仅待处理的账户哈希、`bot/session/invocation/run/turn` 标识、阶段及起始时间写入私有 SharedPreferences。令牌与正文不在 Intent 或该状态文件中。服务重建只恢复只读订阅，绝不自动重新发送 prompt。草稿跨同进程旋转/会话切换保留，不写 SavedState 或磁盘，不保证跨进程保存。
+首版没有引入 Room，以缩小可工作的构建面。机器人、会话、历史和流式文本仅在内存中，进程死亡后会从服务器重新获取；模型／强度偏好及待处理的账户哈希、`bot/session/invocation/run/turn` 标识、阶段及起始时间写入私有 SharedPreferences。令牌与正文不在 Intent 或该状态文件中。服务重建只恢复只读订阅，绝不自动重新发送 prompt。草稿跨同进程旋转/会话切换保留，不写 SavedState 或磁盘，不保证跨进程保存。
 
 ## 配置与构建
 

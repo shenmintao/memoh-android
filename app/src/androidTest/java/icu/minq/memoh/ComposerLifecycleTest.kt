@@ -33,6 +33,10 @@ import org.junit.Rule
 import org.junit.runner.RunWith
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okio.Buffer
 
 @RunWith(AndroidJUnit4::class)
 class ComposerLifecycleTest {
@@ -163,35 +167,137 @@ class ComposerLifecycleTest {
         }
     }
 
-    private suspend fun withApp(test: suspend (MemohApplication, AppState, AtomicBoolean) -> Unit) {
+    @Test fun modelPreferenceSurvivesProcessRestart() = runBlocking {
+        val phase = InstrumentationRegistry.getArguments().getString("modelPersistencePhase") ?: "roundtrip"
+        val application = ApplicationProvider.getApplicationContext<MemohApplication>()
+        val name = if (phase == "roundtrip") "test_model_${UUID.randomUUID()}" else "test_model_process"
+        fun disk() = PreferencesModelSelectionStore(application, name)
+        try {
+            if (phase != "read") withApp(modelStore = disk()) { _, app, _ ->
+                open(app, Session("persisted", "b"))
+                withContext(Dispatchers.Main) { app.selectModel("m2"); app.selectReasoning("high") }
+                assertEquals("m2", app.state.value.composer.modelId)
+                assertEquals("high", app.state.value.composer.effectiveReasoning())
+            }
+            if (phase != "write") withApp(modelStore = disk()) { _, app, _ ->
+                open(app, Session("persisted", "b"))
+                assertEquals("m2", app.state.value.composer.modelId)
+                assertEquals("high", app.state.value.composer.effectiveReasoning())
+                assertEquals("模型二 · 高", app.state.value.composer.composerLabel())
+                withContext(Dispatchers.Main) { app.refreshModels() }
+                withTimeout(5_000) { app.state.first { !it.composer.modelsLoading } }
+                assertEquals("m2", app.state.value.composer.modelId)
+            }
+        } finally { if (phase != "write") application.getSharedPreferences(name, 0).edit().clear().commit() }
+    }
+
+    @Test fun savedSelectionIsIsolatedAndFollowingDefaultIsRemembered() = runBlocking {
+        val store = MemoryModelSelectionStore()
+        val session = Session("persisted", "b")
+        withApp(modelStore = store) { _, app, _ ->
+            open(app, session)
+            withContext(Dispatchers.Main) { app.selectModel("m2"); app.selectReasoning("high"); app.logout() }
+        }
+        withApp(modelStore = store, userId = "other") { _, app, _ -> open(app, session); assertEquals("", app.state.value.composer.modelId) }
+        withApp(modelStore = store, base = "https://other.invalid/api") { _, app, _ -> open(app, session); assertEquals("", app.state.value.composer.modelId) }
+        withApp(modelStore = store) { _, app, _ ->
+            open(app, session); assertEquals("m2", app.state.value.composer.modelId)
+            open(app, session.copy(id = "other")); assertEquals("", app.state.value.composer.modelId)
+            open(app, session)
+            withContext(Dispatchers.Main) { app.selectModel("") }
+        }
+        withApp(modelStore = store) { _, app, _ -> open(app, session); assertEquals("", app.state.value.composer.modelId); assertEquals("模型一", app.state.value.composer.modelLabel()) }
+    }
+
+    @Test fun unavailableSavedModelFallsBackAndDiskFailureDoesNotClaimSuccess() = runBlocking {
+        val store = MemoryModelSelectionStore()
+        val session = Session("persisted", "b")
+        withApp(modelStore = store) { _, app, _ -> open(app, session); withContext(Dispatchers.Main) { app.selectModel("m2") } }
+        withApp(modelStore = store, secondModelAvailable = false) { _, app, _ ->
+            open(app, session)
+            assertEquals("", app.state.value.composer.modelId)
+            assertNotNull(app.state.value.composer.modelsError)
+        }
+        withApp(modelStore = store) { _, app, _ -> open(app, session); assertEquals("", app.state.value.composer.modelId) }
+        val failing = object : ModelSelectionStore {
+            override fun read(key: String): SavedModelSelection? = null
+            override fun write(key: String, selection: SavedModelSelection) { throw java.io.IOException("fixture") }
+        }
+        withApp(modelStore = failing) { _, app, _ ->
+            open(app, session)
+            withContext(Dispatchers.Main) { app.selectModel("m2") }
+            assertEquals("", app.state.value.composer.modelId)
+            assertEquals("无法记住模型设置，请重试", app.state.value.error)
+        }
+    }
+
+    @Test fun directAndACPSelectionsRestoreAfterClientAndRuntimeRecreation() = runBlocking {
+        val store = MemoryModelSelectionStore()
+        val direct = Session("direct", "b", runtimeType = "codex", botAgentId = "agent")
+        val acp = Session("acp", "b", runtimeType = "acp_agent")
+        withApp(modelStore = store) { _, app, failPatch ->
+            open(app, direct)
+            withContext(Dispatchers.Main) { app.selectModel("m2"); app.selectReasoning("high") }
+            open(app, acp); failPatch.set(false)
+            withContext(Dispatchers.Main) { app.selectModel("m2") }
+            withTimeout(5_000) { app.state.first { !it.composer.modelChanging && it.composer.modelId == "m2" } }
+            withContext(Dispatchers.Main) { app.selectReasoning("high") }
+            withTimeout(5_000) { app.state.first { !it.composer.modelChanging && it.composer.effectiveReasoning() == "high" } }
+        }
+        withApp(modelStore = store) { _, app, failPatch ->
+            open(app, direct)
+            assertEquals("m2", app.state.value.composer.modelId)
+            assertEquals("high", app.state.value.composer.effectiveReasoning())
+            open(app, acp)
+            assertTrue(app.state.value.composer.modelUncertain)
+            failPatch.set(false)
+            withContext(Dispatchers.Main) { app.refreshModels() }
+            withTimeout(5_000) { app.state.first { !it.composer.modelsLoading && !it.composer.modelUncertain } }
+            assertEquals("m2", app.state.value.composer.modelId)
+            assertEquals("high", app.state.value.composer.effectiveReasoning())
+        }
+    }
+
+    private suspend fun withApp(modelStore: ModelSelectionStore = MemoryModelSelectionStore(), userId: String = "u",
+        base: String = "https://test.invalid/api", secondModelAvailable: Boolean = true,
+        test: suspend (MemohApplication, AppState, AtomicBoolean) -> Unit) {
         val application = ApplicationProvider.getApplicationContext<MemohApplication>()
         val failPatch = AtomicBoolean(true)
+        val acpModel = AtomicReference("m1")
+        val acpEffort = AtomicReference("medium")
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val path = chain.request().url.encodedPath
             val isPatch = chain.request().method == "PATCH"
             val code = if (path.endsWith("/ws")) 503 else if (isPatch && failPatch.get()) 503 else 200
+            if (isPatch && code == 200) {
+                val buffer = Buffer().also { chain.request().body!!.writeTo(it) }
+                val input = Json.parseToJsonElement(buffer.readUtf8()).jsonObject
+                input["model_id"]?.jsonPrimitive?.content?.let(acpModel::set)
+                input["reasoning_effort"]?.jsonPrimitive?.content?.let(acpEffort::set)
+            }
             val body = when {
-                path.endsWith("/users/me") -> """{"id":"u","username":"fixture"}"""
+                path.endsWith("/users/me") -> """{"id":"$userId","username":"fixture"}"""
                 path.endsWith("/bots") -> """{"items":[{"id":"b","name":"Memoh","current_user_permissions":["manage"]}]}"""
                 path.endsWith("/settings") -> """{"chat_model_id":"m1"}"""
                 path.endsWith("/sessions/s") -> """{"id":"s","bot_id":"b"}"""
-                path.endsWith("/models") -> """[{"id":"m1","name":"模型一","type":"chat"},{"id":"m2","name":"模型二","type":"chat","reasoning":{"supported":true,"efforts":["medium","high"],"default_effort":"medium"}}]"""
+                path.contains("/agents/") && path.endsWith("/models") -> """{"configured_model_id":"m1","models":[{"id":"m1"},{"id":"m2","reasoning_efforts":[{"id":"medium"},{"id":"high"}],"default_reasoning_effort":"medium"}]}"""
+                path.endsWith("/models") -> if (secondModelAvailable) """[{"id":"m1","name":"模型一","type":"chat"},{"id":"m2","name":"模型二","type":"chat","reasoning":{"supported":true,"efforts":["medium","high"],"default_effort":"medium"}}]""" else """[{"id":"m1","name":"模型一","type":"chat"}]"""
                 path.endsWith("/workspace-targets") -> """{"targets":[{"target_id":"native","kind":"native","primary":true},{"target_id":"remote:online","kind":"remote","name":"办公电脑","online":true,"status":"online"},{"target_id":"remote:offline","kind":"remote","online":false}]}"""
-                path.endsWith("/acp-runtime") || path.contains("/acp-runtime/") -> """{"runtime_id":"r","models":{"supported":true,"current_model_id":"${if (path.endsWith("/model")) "m2" else "m1"}","available_models":[{"id":"m1","name":"模型一"},{"id":"m2","name":"模型二"}]},"reasoning":{"supported":true,"current_effort":"${if (path.endsWith("/reasoning")) "high" else "medium"}","available_efforts":[{"id":"medium"},{"id":"high"}]}}"""
+                path.endsWith("/acp-runtime") || path.contains("/acp-runtime/") -> """{"runtime_id":"r","models":{"supported":true,"current_model_id":"${acpModel.get()}","available_models":[{"id":"m1","name":"模型一"},{"id":"m2","name":"模型二"}]},"reasoning":{"supported":true,"current_effort":"${acpEffort.get()}","available_efforts":[{"id":"medium"},{"id":"high"}]}}"""
                 else -> """{"items":[]}"""
             }
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(code).message("fixture")
                 .body(body.toResponseBody("application/json".toMediaType())).build()
         }.build()
         val tokens = object : AuthStore {
-            private var value: AuthMaterial? = AuthMaterial("fixture", "2099-01-01T00:00:00Z", "https://test.invalid/api", "u")
+            private var value: AuthMaterial? = AuthMaterial("fixture", "2099-01-01T00:00:00Z", base, userId)
             override fun read() = value
             override fun write(value: AuthMaterial) { this.value = value }
             override fun clear() { value = null }
         }
         val pending = PendingOperationStore(application, "test_composer_pending").also { it.clear() }
         val original = application.container
-        val container = AppContainer(MemohApi(client, Json { ignoreUnknownKeys = true }, tokens), tokens, pending)
+        val container = AppContainer(MemohApi(client, Json { ignoreUnknownKeys = true }, tokens), tokens, pending, modelSelectionStore = modelStore)
         application.container = container
         val viewModels = ViewModelStore()
         lateinit var app: AppState

@@ -98,7 +98,7 @@ import kotlin.math.roundToInt
 @Composable private fun Composer(state: UiState, actions: UiActions) {
     val readOnly = state.session.isExternalChannel()
     val running = state.runtime.run?.let { !it.isTerminal() } == true
-    val canSend = !readOnly && state.connected && state.connectionFailure == null && !running && state.pending?.blocksSend != true && !state.sendInFlight && !state.loading && !state.composer.modelChanging && !state.composer.modelUncertain && state.attachments.all { it.payload != null }
+    val canSend = !readOnly && state.connected && state.connectionFailure == null && !running && state.pending?.blocksSend != true && !state.sendInFlight && !state.loading && !state.composer.modelsLoading && !state.composer.modelChanging && !state.composer.modelUncertain && state.attachments.all { it.payload != null }
     val dir = state.workdirs.firstOrNull { it.id == state.session?.workdirId }
     var models by remember { mutableStateOf(false) }
     var modelAnchorTop by remember { mutableIntStateOf(0) }
