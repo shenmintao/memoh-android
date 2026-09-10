@@ -16,6 +16,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AbstractSavedStateViewModelFactory
@@ -39,6 +41,8 @@ class MainActivity : ComponentActivity() {
         val container = (application as MemohApplication).container
         appState = ViewModelProvider(this, AppStateFactory(this, intent.extras, application, container))[AppState::class.java]
         setContent {
+            val images = remember(container.api) { icu.minq.memoh.data.ChatImages(container.api) }
+            LaunchedEffect(images) { container.api.authChanges.collect { images.clear() } }
             LaunchedEffect(Unit) {
                 appState.bootstrap(
                     intent.getStringExtra(PendingReplyService.EXTRA_BOT).orEmpty(),
@@ -50,15 +54,22 @@ class MainActivity : ComponentActivity() {
             MemohTheme {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     BackHandler(enabled = state.screen == Screen.Chat || state.screen == Screen.Sessions) { appState.back() }
-                    MemohApp(appState) { send ->
-                        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                            permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    CompositionLocalProvider(icu.minq.memoh.ui.LocalChatImages provides images) {
+                        MemohApp(appState) { send ->
+                            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                                permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            send()
                         }
-                        send()
                     }
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::appState.isInitialized) appState.onForeground()
     }
 
     override fun onNewIntent(intent: Intent) {

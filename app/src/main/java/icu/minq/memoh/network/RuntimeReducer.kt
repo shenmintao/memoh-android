@@ -22,7 +22,7 @@ object RuntimeReducer {
         val patch = delta.run
         if (patch != null) {
             if (run == null || patch.run_id != run.run_id) return state.copy(needsSnapshot = true)
-            run = run.copy(status = patch.status ?: run.status, error_code = patch.error_code ?: run.error_code, error = patch.error ?: run.error, updated_at = patch.updated_at ?: run.updated_at)
+            run = run.copy(steer = patch.steer ?: run.steer, steer_queue = patch.steer_queue ?: run.steer_queue, status = patch.status ?: run.status, error_code = patch.error_code ?: run.error_code, error = patch.error ?: run.error, updated_at = patch.updated_at ?: run.updated_at)
         }
         if (run != null) {
             var messages = if (delta.reset_messages) emptyList() else run.messages

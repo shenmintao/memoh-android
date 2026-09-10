@@ -103,9 +103,10 @@ internal fun fileSizeLabel(bytes: Long): String = when {
     }
 }
 
-@Composable internal fun MessageAttachments(files: List<ChatAttachment>) {
+@Composable internal fun MessageAttachments(files: List<ChatAttachment>, onOpen: () -> Unit = {}) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         files.forEach { file -> Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerLow, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
+            if (file.isImage()) ChatImage(file, onOpen) else
             Row(Modifier.widthIn(max = 320.dp).padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(if (file.type == "image") Icons.Default.Image else Icons.Default.Description, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary)
                 Text(file.name.ifBlank { if (file.type == "image") "图片" else "文件" }, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)

@@ -1,11 +1,18 @@
 package icu.minq.memoh.model
 
 import kotlinx.serialization.KSerializer
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.descriptors.buildClassSerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.*
+
+/** Go's ledger-only runtime recovery serializes a nil message slice as null. */
+object MessageListSerializer : JsonTransformingSerializer<List<MessageBlock>>(ListSerializer(MessageBlockSerializer)) {
+    override fun transformDeserialize(element: JsonElement): JsonElement =
+        if (element == JsonNull) JsonArray(emptyList()) else element
+}
 
 /** Keeps the original JSON so future/unknown message blocks remain inspectable. */
 object MessageBlockSerializer : KSerializer<MessageBlock> {
@@ -22,7 +29,7 @@ object MessageBlockSerializer : KSerializer<MessageBlock> {
             input = raw["input"],
             output = raw["output"],
             toolCallId = raw.string("tool_call_id"),
-            progress = raw["progress"]?.jsonArray?.toList().orEmpty(),
+            progress = (raw["progress"] as? JsonArray)?.toList().orEmpty(),
             running = raw["running"]?.jsonPrimitive?.booleanOrNull == true,
             approval = raw["approval"]?.let { runCatching { jsonDecoder.json.decodeFromJsonElement(Approval.serializer(), it) }.getOrNull() },
             userInput = raw["user_input"]?.let { runCatching { jsonDecoder.json.decodeFromJsonElement(UserInput.serializer(), it) }.getOrNull() },

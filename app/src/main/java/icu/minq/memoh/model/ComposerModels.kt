@@ -12,7 +12,11 @@ import kotlinx.serialization.json.*
     @EncodeDefault val type: String = "file", val name: String = "", @EncodeDefault val mime: String = "application/octet-stream",
     val base64: String? = null, val size: Long? = null,
     @SerialName("content_hash") val contentHash: String? = null,
+    @SerialName("bot_id") val botId: String? = null,
+    val url: String? = null,
 )
+
+fun ChatAttachment.isImage() = type.equals("image", true) || type.equals("gif", true) || mime.startsWith("image/", true)
 
 @Serializable data class ChatModel(
     val id: String = "", val name: String = "", @SerialName("model_id") val modelId: String = "",

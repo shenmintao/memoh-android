@@ -45,6 +45,7 @@ class ChatSocket(
     private val sessionId: String,
     private val listener: ChatSocketListener,
     callback: (((() -> Unit)) -> Unit)? = null,
+    private val snapshotTimeoutMillis: Long = 15_000,
 ) {
     private val serial = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "memoh-chat").apply { isDaemon = true }
@@ -61,6 +62,8 @@ class ChatSocket(
     private var attempt = 0L
     private var reconnectDelay = 1_000L
     private var reconnect: ScheduledFuture<*>? = null
+    private var snapshotTimeout: ScheduledFuture<*>? = null
+    private var runtimePublication: ScheduledFuture<*>? = null
     private var state = RuntimeState(sessionId = sessionId)
     private data class Control(val type: String, val runId: String, val timer: ScheduledFuture<*>)
     private val controls = mutableMapOf<String, Control>()
@@ -86,6 +89,8 @@ class ChatSocket(
         } }.onFailure { dispatch { onQueued(false) } }
     }
 
+    fun steer(runId: String, id: String, text: String, previousId: String, queue: Boolean = false): String? = control("steer", runId, id) { put("text", text); put("previous_steer_id", previousId); if (queue) put("queue", true) }
+
     fun abort(runId: String): String? = control("abort", runId) { }
     fun approve(runId: String, approvalId: String, approve: Boolean, optionId: String? = null, reason: String = ""): String? =
         control("tool_approval_response", runId) {
@@ -101,11 +106,17 @@ class ChatSocket(
             else putJsonArray("answers") { answers.forEach { add(api.json.encodeToJsonElement(UserAnswer.serializer(), it)) } }
         }
 
+    fun resync() = post {
+        val previous = socket
+        detachSerial()
+        previous?.cancel()
+        connectSerial(WebSocketAuthMode.HEADER)
+    }
+
     fun refreshRuntime() = post { if (isUsable()) subscribeSerial() }
 
-    private fun control(type: String, runId: String, extras: JsonObjectBuilder.() -> Unit): String? {
+    private fun control(type: String, runId: String, id: String = UUID.randomUUID().toString(), extras: JsonObjectBuilder.() -> Unit): String? {
         if (!isUsable()) return null
-        val id = UUID.randomUUID().toString()
         val payload = buildJsonObject {
             put("type", type); put("run_id", runId); put("session_id", sessionId); put("control_id", id); extras()
         }.toString()
@@ -128,6 +139,8 @@ class ChatSocket(
         runCatching { serial.execute {
             attempt++
             reconnect?.cancel(false)
+            snapshotTimeout?.cancel(false); snapshotTimeout = null
+            runtimePublication?.cancel(false); runtimePublication = null
             controls.values.forEach { it.timer.cancel(false) }; controls.clear()
             socket?.cancel(); socket = null
             serial.shutdown() // Drain already-enqueued send callbacks so their UI gate is released.
@@ -210,7 +223,17 @@ class ChatSocket(
         !closed && ticket == attempt && socket === candidate && api.authEpoch == expectedEpoch
 
     private fun subscribeSerial() {
-        socket?.send(buildJsonObject { put("type", "runtime_subscribe"); put("session_id", sessionId) }.toString())
+        // Coalesce gap recovery and bound the wait for an authoritative response.
+        if (snapshotTimeout != null) return
+        if (socket?.send(buildJsonObject { put("type", "runtime_subscribe"); put("session_id", sessionId) }.toString()) != true) {
+            socket?.cancel()
+            reconnectSerial()
+            return
+        }
+        snapshotTimeout = serial.schedule({
+            snapshotTimeout = null
+            failPermanent("服务器未返回会话状态，请重新打开会话")
+        }, snapshotTimeoutMillis, TimeUnit.MILLISECONDS)
     }
 
     private fun handleSerial(text: String) {
@@ -240,26 +263,45 @@ class ChatSocket(
             }
             "runtime_snapshot" -> {
                 if (event.string("session_id") != sessionId) return
-                val snapshot = runCatching { api.json.decodeFromJsonElement(RuntimeSnapshot.serializer(), event.getValue("snapshot")) }.getOrNull() ?: return
-                state = RuntimeReducer.snapshot(state, sessionId, event.string("epoch"), event.long("seq"), snapshot)
+                val snapshot = runCatching { api.json.decodeFromJsonElement(RuntimeSnapshot.serializer(), event.getValue("snapshot")) }.getOrNull()
+                if (snapshot == null) {
+                    failPermanent("无法读取服务器会话状态，请重新打开会话或更新应用")
+                    return
+                }
+                state = RuntimeReducer.snapshot(state, sessionId, event.string("epoch"), event.long("seq"), snapshot).copy(steerSupported = event["steer_supported"]?.jsonPrimitive?.booleanOrNull == true, steerQueueSupported = event["steer_queue_supported"]?.jsonPrimitive?.booleanOrNull == true)
+                if (state.needsSnapshot) {
+                    failPermanent("服务器会话状态不一致，请重新打开会话")
+                    return
+                }
+                snapshotTimeout?.cancel(false); snapshotTimeout = null
                 publishSerial()
             }
             "runtime_delta" -> {
                 if (event.string("session_id") != sessionId) return
-                val delta = runCatching { api.json.decodeFromJsonElement(RuntimeDelta.serializer(), event.getValue("delta")) }.getOrNull() ?: return
-                state = RuntimeReducer.delta(state, sessionId, event.string("epoch"), event.long("seq"), delta)
-                publishSerial()
+                val delta = runCatching { api.json.decodeFromJsonElement(RuntimeDelta.serializer(), event.getValue("delta")) }.getOrNull()
+                state = if (delta == null) state.copy(needsSnapshot = true)
+                    else RuntimeReducer.delta(state, sessionId, event.string("epoch"), event.long("seq"), delta)
+                publishSerial(coalesce = delta != null && delta.run == null && delta.current_run_view == null &&
+                    delta.message_upserts.isEmpty() && !delta.reset_messages)
             }
             "runtime_dropped" -> { state = state.copy(needsSnapshot = true); publishSerial() }
         }
     }
 
-    private fun publishSerial() {
+    private fun publishSerial(coalesce: Boolean = false) {
         if (state.needsSnapshot) {
             if (usable) { usable = false; notifyMain { listener.onConnection(false) } }
             subscribeSerial()
             return
         }
+        if (coalesce && usable) {
+            if (runtimePublication == null) runtimePublication = serial.schedule({
+                runtimePublication = null
+                publishSerial()
+            }, 100, TimeUnit.MILLISECONDS)
+            return
+        }
+        runtimePublication?.cancel(false); runtimePublication = null
         val captured = state // Never read the actor's mutable state from a delayed main callback.
         if (!usable) { usable = true; notifyMain { listener.onConnection(true) } }
         notifyMain { listener.onRuntime(captured) }
@@ -267,6 +309,8 @@ class ChatSocket(
 
     private fun detachSerial() {
         attempt++
+        runtimePublication?.cancel(false); runtimePublication = null
+        snapshotTimeout?.cancel(false); snapshotTimeout = null
         connecting = false
         socket = null
         usable = false

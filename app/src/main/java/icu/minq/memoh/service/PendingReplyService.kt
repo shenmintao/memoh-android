@@ -58,6 +58,8 @@ class PendingReplyService : Service() {
             override fun onRuntime(state: RuntimeState) {
                 if (!current(operation)) return
                 val run = state.run?.takeIf { it.invocation_id == pending.invocationId } ?: return
+                // Persist the supplement receipt before task completion can stop this monitor.
+                runCatching { container.steeringStore.observe(steeringKey(pending.accountKey, pending.botId, pending.sessionId), run) }
                 container.pendingStore.observe(pending.accountKey, pending.botId, pending.sessionId, run)
                 if (!current(operation)) return
                 val newDecisions = ReplyNotificationPolicy.decisionIds(run) - notifiedDecisions

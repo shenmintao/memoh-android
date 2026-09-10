@@ -1,17 +1,13 @@
 package icu.minq.memoh.ui
 
-import android.net.Uri
-import android.text.Spannable
-import android.text.method.LinkMovementMethod
-import android.text.style.URLSpan
-import android.widget.TextView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -26,45 +22,71 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import icu.minq.memoh.data.UiState
+import icu.minq.memoh.data.supplements
 import icu.minq.memoh.data.reconciledHistory
+import icu.minq.memoh.data.displayedRun
 import icu.minq.memoh.data.pendingDecisions
 import icu.minq.memoh.model.*
-import io.noties.markwon.Markwon
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
+import kotlinx.serialization.json.JsonElement
 import kotlin.math.roundToInt
 
 @Composable internal fun ChatScreen(state: UiState, actions: UiActions) {
+    CompositionLocalProvider(LocalImageBot provides state.bot?.id.orEmpty()) {
     key(state.bot?.id, state.session?.id) {
         var expandedTool by rememberSaveable { mutableStateOf<String?>(null) }
-        val toggleTool: (String) -> Unit = { id -> expandedTool = if (expandedTool == id) null else id }
-        val live = state.runtime.run
-        val settled = remember(state.history, live?.turn_id, live?.request_user_turn) { reconciledHistory(state.history, live) }
-        val list = rememberLazyListState()
-        val dragging by list.interactionSource.collectIsDraggedAsState()
-        val scope = rememberCoroutineScope()
         var follow by remember { mutableStateOf(true) }
-        val total = settled.size + if (live != null) 1 else 0
-        val empty = total == 0 && !state.loading
-        val running = live != null && !live.isTerminal()
-        LaunchedEffect(dragging, list.canScrollForward) {
-            if (dragging) follow = !list.canScrollForward
-            else if (!list.canScrollForward) follow = true
+        val pauseFollow = { follow = false }
+        val toggleTool: (String) -> Unit = { id -> follow = false; expandedTool = if (expandedTool == id) null else id }
+        val live = remember(state.history, state.runtime.run) { displayedRun(state.history, state.runtime.run) }
+        val settled = remember(state.history, live?.turn_id, live?.status, live?.messages?.isNotEmpty(), live?.request_user_turn) { reconciledHistory(state.history, live) }
+        val terminal = state.runtime.run?.takeIf { live == null }
+        val rows = remember(settled, live, state.steeringQueue, state.steering, terminal) { chatRows(settled, live, state.supplements(), terminal) }
+        // Start at the tail without composing/measuring all earlier tool steps.
+        val list = rememberLazyListState(initialFirstVisibleItemIndex = rows.size)
+        val scope = rememberCoroutineScope()
+        val empty = rows.isEmpty() && !state.loading
+        LaunchedEffect(list) {
+            var released: Job? = null
+            list.interactionSource.interactions.collect { interaction ->
+                when (interaction) {
+                    is DragInteraction.Start -> { released?.cancel(); follow = false }
+                    is DragInteraction.Stop -> released = launch {
+                        withFrameNanos { }
+                        snapshotFlow { list.isScrollInProgress }.first { !it }
+                        if (!list.canScrollForward) follow = true
+                    }
+                }
+            }
         }
-        LaunchedEffect(total, live?.messages, live?.status) {
-            if (total > 0 && follow && !list.isScrollInProgress) list.animateScrollToItem(total - 1, Int.MAX_VALUE)
+        LaunchedEffect(list, follow) {
+            if (follow) snapshotFlow { list.layoutInfo }.collect { layout ->
+                // Layout, including asynchronous Markdown, owns tail growth. Never
+                // restart an animation per token or take over a reader's gesture.
+                if (layout.totalItemsCount > 0 && !list.isScrollInProgress && list.canScrollForward) {
+                    val tail = layout.visibleItemsInfo.lastOrNull()?.takeIf { it.index == layout.totalItemsCount - 1 }
+                    if (tail == null) list.scrollToItem(layout.totalItemsCount - 1)
+                    else {
+                        val growth = tail.offset + tail.size + layout.afterContentPadding - layout.viewportEndOffset
+                        if (growth > 0) list.scrollBy(growth.toFloat())
+                    }
+                }
+            }
         }
         Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
             if (empty) {
@@ -76,21 +98,23 @@ import kotlin.math.roundToInt
                 }
             } else {
                 Box(Modifier.weight(1f).widthIn(max = 840.dp).fillMaxWidth()) {
-                    LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                        itemsIndexed(settled, key = { index, turn -> "${turn.id ?: turn.turnId}:${turn.role}:$index" }) { index, turn ->
-                            TurnView(turn, state, actions, turn.turnId.ifBlank { turn.id ?: "history:$index" }, expandedTool, toggleTool)
-                        }
-                        live?.let { run -> item("live-${run.run_id}") {
-                            Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                                val turnKey = run.turn_id.ifBlank { "run:${run.run_id}" }
-                                run.request_user_turn?.let { TurnView(it, state, actions, turnKey, expandedTool, toggleTool) }
-                                AssistantMessage(run.messages, state, actions, running, turnKey, expandedTool, toggleTool)
-                                run.visibleError()?.let { error -> if (run.messages.none { it.type == "error" && it.content.trim() == error }) ErrorCard(error) }
-                                if (run.status == "aborted") Text("已停止生成", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    LazyColumn(Modifier.fillMaxSize().testTag("chat-timeline"), state = list, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(rows, key = { it.key }, contentType = { it.contentType }) { row ->
+                            when (row) {
+                                is ChatRow.Turn -> TurnView(row.turn, pauseFollow)
+                                is ChatRow.Block -> AssistantBlock(row.block, state, row.streaming, row.turnKey, expandedTool, toggleTool, pauseFollow)
+                                is ChatRow.Copy -> CopyReply(row.blocks)
+                                is ChatRow.Status -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
+                                    Text(row.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                is ChatRow.Error -> ErrorCard(row.error)
+                                is ChatRow.Stopped -> Text("已停止生成", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                        } }
+                        }
+                        item("chat-bottom", contentType = "bottom") { Spacer(Modifier.fillMaxWidth().height(1.dp).testTag("chat-bottom")) }
                     }
-                    if (list.canScrollForward && !follow) SmallFloatingActionButton({ follow = true; scope.launch { list.animateScrollToItem((total - 1).coerceAtLeast(0), Int.MAX_VALUE) } },
+                    if (list.canScrollForward && !follow) SmallFloatingActionButton({ scope.launch { list.scrollToItem(rows.size); follow = true } },
                         Modifier.align(Alignment.BottomCenter).padding(10.dp), containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
                         Icon(Icons.Default.ArrowDownward, "回到最新消息", Modifier.size(20.dp))
                     }
@@ -99,6 +123,7 @@ import kotlin.math.roundToInt
             }
         }
     }
+}
 }
 
 @Composable private fun Composer(state: UiState, actions: UiActions) {
@@ -110,11 +135,40 @@ import kotlin.math.roundToInt
     }
     val running = state.runtime.run?.let { !it.isTerminal() } == true
     val canSend = !readOnly && state.connected && state.connectionFailure == null && !running && state.pending?.blocksSend != true && !state.sendInFlight && !state.loading && !state.composer.modelsLoading && !state.composer.modelChanging && !state.composer.modelUncertain && state.attachments.all { it.payload != null }
+    val supplementMode = running && !readOnly && (state.draft.isNotBlank() || state.attachments.isNotEmpty())
+    val canSteer = state.draft.isNotBlank() && state.runtime.steerSupported && state.connected && state.connectionFailure == null &&
+        state.runtime.run?.status == "running" && !state.runtime.needsSnapshot && state.attachments.isEmpty() &&
+        (state.runtime.steerQueueSupported || (state.supplements().none { it.inFlight } && state.runtime.run?.steer?.status !in setOf("pending", "queued")))
     val dir = state.workdirs.firstOrNull { it.id == state.session?.workdirId }
     var models by remember { mutableStateOf(false) }
     var modelAnchorTop by remember { mutableIntStateOf(0) }
     var devices by remember { mutableStateOf(false) }
     Column {
+        val supplements = state.supplements().filter { it.status != "applied" }
+        if (supplements.isNotEmpty()) Column {
+            if (supplements.size > 1) Text("补充队列 · ${supplements.count { it.inFlight }} 条待处理", style = MaterialTheme.typography.labelMedium, modifier=Modifier.padding(bottom=4.dp))
+            Column(Modifier.heightIn(max=184.dp).verticalScroll(rememberScrollState())) {
+                supplements.forEach { supplement ->
+                    key(supplement.id) {
+                        Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                Text(supplement.label(), style = MaterialTheme.typography.labelMedium)
+                                Text(supplement.text, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                                if (supplement.status in setOf("rejected", "unknown", "applied")) Row {
+                                    if (supplement.status != "applied") TextButton({ actions.recoverSteering(supplement.id) }) { Text("复制到输入框") }
+                                    if (!supplement.inFlight || (!state.runtime.needsSnapshot && (state.runtime.run?.run_id != supplement.runId || state.runtime.run.isTerminal()))) TextButton({ actions.dismissSteering(supplement.id) }) { Text("关闭") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (supplementMode) Text(when {
+            state.attachments.isNotEmpty() -> "运行中仅支持文字补充，附件请在下一条消息发送"
+            !state.runtime.steerSupported -> "服务器未开启运行中补充"
+            else -> "补充到当前回复"
+        }, Modifier.padding(start = 8.dp, bottom = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceBright,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
             Column(Modifier.fillMaxWidth().padding(12.dp)) {
@@ -125,7 +179,7 @@ import kotlin.math.roundToInt
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     decorationBox = { field ->
                         Box {
-                            if (state.draft.isBlank()) Text(if (readOnly) "外部渠道会话仅供查看" else "发送消息…", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (state.draft.isBlank()) Text(if (readOnly) "外部渠道会话仅供查看" else if (running) "输入补充要求…" else "发送消息…", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             field()
                         }
                     })
@@ -148,7 +202,10 @@ import kotlin.math.roundToInt
                     if (models) ModelPicker(state, actions, modelAnchorTop) { models = false }
                     } }
                     Spacer(Modifier.width(8.dp))
-                    if (running && !readOnly) FilledIconButton(actions.stop, enabled = state.connected && state.pendingControls.isEmpty(), modifier = Modifier.size(40.dp),
+                    if (supplementMode) FilledIconButton(actions.steer, enabled = canSteer, modifier = Modifier.size(40.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.onSurface, contentColor = MaterialTheme.colorScheme.surface)) {
+                        Icon(Icons.Default.ArrowUpward, "提交补充内容", Modifier.size(20.dp))
+                    } else if (running && !readOnly) FilledIconButton(actions.stop, enabled = state.connected && state.pendingControls.isEmpty(), modifier = Modifier.size(40.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.onSurface, contentColor = MaterialTheme.colorScheme.surface)) {
                         Icon(Icons.Default.Stop, "停止生成", Modifier.size(20.dp))
                     } else FilledIconButton({ if (canSend && (state.draft.isNotBlank() || state.attachments.isNotEmpty())) actions.send(state.draft) }, enabled = canSend && (state.draft.isNotBlank() || state.attachments.isNotEmpty()), modifier = Modifier.size(40.dp),
@@ -176,59 +233,57 @@ import kotlin.math.roundToInt
     if (devices) DevicePicker(state, actions) { devices = false }
 }
 
-@Composable private fun TurnView(turn: ChatTurn, state: UiState, actions: UiActions, turnKey: String, expandedTool: String?, toggleTool: (String) -> Unit) {
+@Composable private fun TurnView(turn: ChatTurn, onInteract: () -> Unit = {}) {
     when (turn.role) {
         "user" -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            MessageAttachments(turn.attachments + turn.messages.filter { it.type == "attachments" }.flatMap { it.attachments() })
+            val files = remember(turn.attachments, turn.messages) { turn.attachments + turn.messages.filter { it.type == "attachments" }.flatMap { it.attachments() } }
+            MessageAttachments(files, onInteract)
             if (turn.text.isNotBlank()) Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(20.dp), modifier = Modifier.widthIn(max = 620.dp)) {
-                SelectionContainer { Text(turn.text, Modifier.padding(horizontal = 16.dp, vertical = 12.dp), color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.bodyLarge) }
+                Box(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) { LongPlainText(turn.text) }
             }
         }
-        "assistant" -> AssistantMessage(turn.messages.ifEmpty { if (turn.text.isNotBlank()) listOf(MessageBlock(type = "text", content = turn.text)) else emptyList() }, state, actions, false, turnKey, expandedTool, toggleTool)
         else -> NoticeCard(turn.text.ifBlank { "系统消息" })
     }
 }
 
-@Composable private fun AssistantMessage(blocks: List<MessageBlock>, state: UiState, actions: UiActions, streaming: Boolean, turnKey: String, expandedTool: String?, toggleTool: (String) -> Unit) {
-    val clipboard = LocalClipboardManager.current
-    var copied by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        blocks.forEach { block -> key(block.id, block.type) {
-            when (block.type) {
-                "text" -> MarkdownText(block.content)
-                "reasoning" -> CollapsibleDetail("思考过程", block.content, Icons.Default.AutoAwesome)
-                "tool" -> {
-                    // Block numbers repeat across turns; tool call IDs survive live-to-history updates.
-                    val toolKey = "${turnKey.length}:$turnKey:${block.toolCallId.ifBlank { "block:${block.id}" }}"
-                    ToolCard(block, state, expandedTool == toolKey) { toggleTool(toolKey) }
-                }
-                "error" -> ErrorCard(block.content)
-                "notice" -> if (block.content.isNotBlank()) NoticeCard(block.content)
-                "attachments" -> MessageAttachments(block.attachments())
-                else -> CollapsibleDetail("消息详情 · ${block.type}", block.raw.toString(), Icons.Default.Info)
-            }
-        } }
-        if (streaming) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
-            Text(state.runtime.run.waitingLabel(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else if (blocks.any { it.type == "text" && it.content.isNotBlank() }) {
-            IconButton({ clipboard.setText(AnnotatedString(blocks.filter { it.type == "text" }.joinToString("\n\n") { it.content })); copied = true }, Modifier.size(40.dp)) {
-                Icon(if (copied) Icons.Default.Check else Icons.Default.ContentCopy, if (copied) "已复制回复" else "复制回复", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+@Composable private fun AssistantBlock(block: MessageBlock, state: UiState, streaming: Boolean, turnKey: String, expandedTool: String?, toggleTool: (String) -> Unit, pauseFollow: () -> Unit) {
+    when (block.type) {
+        "text" -> MarkdownText(block.content, streaming, pauseFollow)
+        "user_message" -> TurnView(ChatTurn(turnId = turnKey, role = "user", text = block.content), pauseFollow)
+        "reasoning" -> CollapsibleDetail("思考过程", block.content, Icons.Default.AutoAwesome, pauseFollow)
+        "tool" -> {
+            val toolKey = "${turnKey.length}:$turnKey:${block.toolCallId.ifBlank { "block:${block.id}" }}"
+            ToolCard(block, state, expandedTool == toolKey) { toggleTool(toolKey) }
+        }
+        "error" -> ErrorCard(block.content)
+        "notice" -> if (block.content.isNotBlank()) NoticeCard(block.content)
+        "attachments" -> MessageAttachments(remember(block.raw) { block.attachments() }, pauseFollow)
+        else -> {
+            var expanded by rememberSaveable { mutableStateOf(false) }
+            TextButton({ pauseFollow(); expanded = !expanded }) { Text("消息详情 · ${block.type}") }
+            if (expanded) JsonDetail(block.raw)
         }
     }
 }
 
-@Composable private fun CollapsibleDetail(title: String, text: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
+@Composable private fun CopyReply(blocks: List<MessageBlock>) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+    IconButton({ clipboard.setText(AnnotatedString(blocks.filter { it.type == "text" }.joinToString("\n\n") { it.content })); copied = true }, Modifier.size(40.dp)) {
+        Icon(if (copied) Icons.Default.Check else Icons.Default.ContentCopy, if (copied) "已复制回复" else "复制回复", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable private fun CollapsibleDetail(title: String, text: String, icon: androidx.compose.ui.graphics.vector.ImageVector, pauseFollow: () -> Unit) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column {
-        Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().clickable { pauseFollow(); expanded = !expanded }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Icon(icon, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ChevronRight, if (expanded) "收起详情" else "展开详情", Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (expanded) Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = RoundedCornerShape(10.dp)) {
-            SelectionContainer { Text(text, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall) }
+            Box(Modifier.padding(12.dp)) { LongPlainText(text) }
         }
     }
 }
@@ -243,9 +298,9 @@ import kotlin.math.roundToInt
                 Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ChevronRight, if (expanded) "收起工具详情" else "展开工具详情", Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (expanded) Column(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                block.input?.let { Text("输入", style = MaterialTheme.typography.labelMedium); DetailText(it.toString()) }
-                block.output?.let { Text("结果", style = MaterialTheme.typography.labelMedium); DetailText(it.toString()) }
-                block.progress.takeLast(3).forEach { DetailText(it.toString()) }
+                block.input?.let { Text("输入", style = MaterialTheme.typography.labelMedium); JsonDetail(it) }
+                block.output?.let { Text("结果", style = MaterialTheme.typography.labelMedium); JsonDetail(it) }
+                block.progress.takeLast(3).forEach { JsonDetail(it) }
             }
             block.approval?.let { approval ->
                 Text(when (approval.status) {
@@ -263,25 +318,9 @@ import kotlin.math.roundToInt
     }
 }
 
-@Composable private fun DetailText(text: String) {
-    SelectionContainer { Text(text.take(8000), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-}
-
-@Composable private fun MarkdownText(markdown: String) {
-    val context = LocalContext.current
-    val markwon = remember(context) { Markwon.create(context) }
-    val ink = MaterialTheme.colorScheme.onSurface.toArgb()
-    val link = MaterialTheme.colorScheme.primary.toArgb()
-    val safe = remember(markdown) { markdown.replace(Regex("""(?i)\]\((javascript|file|content|intent):[^)]*\)"""), "](已阻止的不安全链接)") }
-    AndroidView(modifier = Modifier.fillMaxWidth(), factory = { TextView(it).apply {
-        textSize = 16f; setLineSpacing(0f, 1.45f); setTextIsSelectable(true); movementMethod = LinkMovementMethod.getInstance(); includeFontPadding = false
-    } }, update = { view ->
-        view.setTextColor(ink); view.setLinkTextColor(link)
-        if (view.tag != safe) {
-            markwon.setMarkdown(view, safe); view.tag = safe
-            (view.text as? Spannable)?.let { text -> text.getSpans(0, text.length, URLSpan::class.java).forEach { span ->
-                if (Uri.parse(span.url).scheme?.lowercase() !in setOf("https", "http")) text.removeSpan(span)
-            } }
-        }
-    })
+@Composable private fun JsonDetail(content: JsonElement) {
+    val text by produceState<String?>(null, content) {
+        value = withContext(Dispatchers.Default) { content.toString() }
+    }
+    text?.let { LongPlainText(it, monospace = true) } ?: Text("正在加载详情…", style = MaterialTheme.typography.bodySmall)
 }

@@ -18,7 +18,7 @@ import kotlinx.serialization.json.JsonElement
 @Serializable data class CreateSessionRequest(val title: String = "", @SerialName("channel_type") val channelType: String = "local", @SerialName("bot_agent_id") val botAgentId: String? = null, val type: String? = null, @SerialName("session_mode") val sessionMode: String? = null, @SerialName("runtime_type") val runtimeType: String? = null, val metadata: Map<String, String> = emptyMap(), @SerialName("runtime_metadata") val runtimeMetadata: Map<String, String> = emptyMap(), @SerialName("workdir_id") val workdirId: String? = null)
 
 @Serializable data class HistoryResponse(val items: List<ChatTurn> = emptyList())
-@Serializable data class ChatTurn(@SerialName("turn_id") val turnId: String = "", val role: String, val text: String = "", val messages: List<MessageBlock> = emptyList(), val timestamp: String = "", val id: String? = null, val attachments: List<ChatAttachment> = emptyList())
+@Serializable data class ChatTurn(@SerialName("turn_id") val turnId: String = "", val role: String, val text: String = "", @Serializable(with = MessageListSerializer::class) val messages: List<MessageBlock> = emptyList(), val timestamp: String = "", val id: String? = null, val attachments: List<ChatAttachment> = emptyList(), @SerialName("run_id") val runId: String = "")
 @Serializable(with = MessageBlockSerializer::class)
 data class MessageBlock(val id: Int = 0, val type: String, val content: String = "", val name: String = "", val input: JsonElement? = null, val output: JsonElement? = null, val toolCallId: String = "", val progress: List<JsonElement> = emptyList(), val running: Boolean = false, val approval: Approval? = null, val userInput: UserInput? = null, val raw: kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.JsonObject(emptyMap()))
 @Serializable data class Approval(@SerialName("approval_id") val approvalId: String, val status: String, @SerialName("can_approve") val canApprove: Boolean = true, val options: List<ApprovalOption> = emptyList(), @SerialName("selected_option_id") val selectedOptionId: String? = null)
@@ -32,14 +32,15 @@ data class MessageBlock(val id: Int = 0, val type: String, val content: String =
     @SerialName("option_ids") val optionIds: List<String> = emptyList(), @SerialName("custom_text") val customText: String = "",
     val text: String = "", val skipped: Boolean = false)
 
-@Serializable data class RuntimeRun(val run_id: String, val turn_id: String, val invocation_id: String? = null, val generation: String = "", val status: String, val started_at: String = "", val updated_at: String = "", val messages: List<MessageBlock> = emptyList(), val request_user_turn: ChatTurn? = null, val error_code: String? = null, val error: String? = null)
+@Serializable data class SteerState(val id: String, val status: String, val text: String = "", val error: String = "", val after_message_id: Int? = null)
+@Serializable data class RuntimeRun(val run_id: String, val turn_id: String, val invocation_id: String? = null, val generation: String = "", val status: String, val started_at: String = "", val updated_at: String = "", @Serializable(with = MessageListSerializer::class) val messages: List<MessageBlock> = emptyList(), val request_user_turn: ChatTurn? = null, val steer: SteerState? = null, val steer_queue: List<SteerState> = emptyList(), val error_code: String? = null, val error: String? = null)
 @Serializable data class RuntimeSnapshot(val bot_id: String = "", val session_id: String, val epoch: String, val seq: Long, val current_run_view: RuntimeRun? = null, val updated_at: String = "")
-@Serializable data class RunPatch(val run_id: String, val status: String? = null, val error_code: String? = null, val error: String? = null, val updated_at: String? = null)
+@Serializable data class RunPatch(val run_id: String, val steer: SteerState? = null, val steer_queue: List<SteerState>? = null, val status: String? = null, val error_code: String? = null, val error: String? = null, val updated_at: String? = null)
 @Serializable data class MessageAppend(val id: Int, val type: String, val content: String)
 @Serializable data class ProgressAppend(val id: Int, val progress: JsonElement, val input: JsonElement? = null)
 @Serializable data class RuntimeDelta(val current_run_view: RuntimeRun? = null, val run: RunPatch? = null, val message_appends: List<MessageAppend> = emptyList(), val progress_appends: List<ProgressAppend> = emptyList(), val message_upserts: List<MessageBlock> = emptyList(), val reset_messages: Boolean = false)
 
-data class RuntimeState(val sessionId: String = "", val epoch: String = "", val seq: Long = -1, val run: RuntimeRun? = null, val needsSnapshot: Boolean = true)
+data class RuntimeState(val sessionId: String = "", val epoch: String = "", val seq: Long = -1, val run: RuntimeRun? = null, val needsSnapshot: Boolean = true, val steerSupported: Boolean = false, val steerQueueSupported: Boolean = false)
 
 val terminalStatuses = setOf("completed", "aborted", "errored", "lost")
 fun RuntimeRun?.isTerminal() = this?.status in terminalStatuses

@@ -3,6 +3,8 @@ package icu.minq.memoh.network
 import icu.minq.memoh.model.*
 import icu.minq.memoh.security.AuthStore
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +20,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.io.ByteArrayOutputStream
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -61,6 +64,9 @@ class MemohApi(val client: OkHttpClient, val json: Json, private val tokenStore:
     suspend fun workdirs(botId: String): List<Workdir> = get("bots/$botId/workdirs", WorkdirsResponse.serializer()).workdirs.filterNot { it.archived }
     suspend fun sessions(botId: String): List<Session> = get("bots/$botId/sessions?types=chat,discuss,acp_agent&limit=50", ItemsResponse.serializer(Session.serializer())).items
     suspend fun session(botId: String, sessionId: String): Session = get("bots/$botId/sessions/$sessionId", Session.serializer())
+    suspend fun deleteSession(botId: String, sessionId: String) {
+        authenticated("bots/$botId/sessions/$sessionId", "DELETE", null)
+    }
     suspend fun history(botId: String, sessionId: String): List<ChatTurn> = get("bots/$botId/messages?session_id=$sessionId&limit=50", HistoryResponse.serializer()).items
     suspend fun workspaceTargets(botId: String): List<WorkspaceTarget> = get("bots/$botId/workspace-targets", WorkspaceTargets.serializer()).targets.filter { it.targetId.isNotBlank() && it.kind.isNotBlank() }
     suspend fun models(): List<ChatModel> = get("models", ListSerializer(ChatModel.serializer())).filter { it.id.isNotBlank() && it.type == "chat" && it.enable }
@@ -112,15 +118,20 @@ class MemohApi(val client: OkHttpClient, val json: Json, private val tokenStore:
         refreshLocked(current)
     }
 
-    private suspend fun <T> get(path: String, serializer: KSerializer<T>): T =
-        json.decodeFromString(serializer, authenticated(path, "GET", null))
+    private suspend fun <T> get(path: String, serializer: KSerializer<T>): T {
+        val text = authenticated(path, "GET", null)
+        return withContext(Dispatchers.Default) { json.decodeFromString(serializer, text) }
+    }
     private suspend fun <B, T> post(path: String, body: B, bodySerializer: KSerializer<B>, responseSerializer: KSerializer<T>): T =
         json.decodeFromString(responseSerializer, authenticated(path, "POST", json.encodeToString(bodySerializer, body).toRequestBody(media)))
 
-    private suspend fun authenticated(path: String, method: String, body: RequestBody?): String {
+    private suspend fun authenticated(path: String, method: String, body: RequestBody?): String =
+        authenticatedRequest(path, method, body, ::execute)
+
+    private suspend fun <T> authenticatedRequest(path: String, method: String, body: RequestBody?, fetch: suspend (Request) -> T): T {
         val first = freshLease()
         try {
-            val text = execute(authorizedRequest(first.auth, path, method, body))
+            val text = fetch(authorizedRequest(first.auth, path, method, body))
             synchronized(authLock) { requireEpoch(first.generation) }
             return text
         } catch (failure: ApiException) {
@@ -134,13 +145,62 @@ class MemohApi(val client: OkHttpClient, val json: Json, private val tokenStore:
             if (installed.auth.accessToken != first.auth.accessToken) installed else refreshLocked(installed)
         }
         return try {
-            val text = execute(authorizedRequest(retry.auth, path, method, body))
+            val text = fetch(authorizedRequest(retry.auth, path, method, body))
             synchronized(authLock) { requireEpoch(retry.generation) }
             text
         } catch (failure: ApiException) {
             if (failure.status == 401) clearAuthIfToken(retry.auth.accessToken, retry.generation)
             throw failure
         }
+    }
+
+    /** Only the bot-scoped media route receives the session credential. */
+    suspend fun mediaBytes(botId: String, contentHash: String): ByteArray {
+        require(botId.matches(Regex("[a-zA-Z0-9_-]{1,128}"))) { "图片所属机器人无效" }
+        require(contentHash.matches(Regex("[a-fA-F0-9]{64}"))) { "图片标识无效" }
+        return authenticatedRequest("bots/$botId/media/$contentHash", "GET", null, ::executeImage)
+    }
+
+    suspend fun publicImageBytes(url: String): ByteArray {
+        val parsed = url.toHttpUrl()
+        require(parsed.scheme == "https" && parsed.username.isEmpty() && parsed.password.isEmpty()) { "图片地址无效" }
+        // No token or authenticated interceptor is attached to external images.
+        return executeImage(Request.Builder().url(parsed).get().build())
+    }
+
+    private val imageClient by lazy { client.newBuilder().followRedirects(false).followSslRedirects(false).build() }
+    private suspend fun executeImage(request: Request): ByteArray = suspendCancellableCoroutine { continuation ->
+        val call = imageClient.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val bytes = response.use {
+                        if (!it.isSuccessful) throw ApiException(it.code, "图片加载失败")
+                        val body = it.body ?: throw IOException("图片为空")
+                        if (body.contentLength() > MAX_IMAGE_BYTES) throw ApiException(413, "图片过大")
+                        val output = ByteArrayOutputStream()
+                        body.byteStream().use { input ->
+                            val buffer = ByteArray(32 * 1024)
+                            while (true) {
+                                if (!continuation.isActive) throw CancellationException()
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                if (output.size().toLong() + count > MAX_IMAGE_BYTES) throw ApiException(413, "图片过大")
+                                output.write(buffer, 0, count)
+                            }
+                        }
+                        output.toByteArray()
+                    }
+                    if (continuation.isActive) continuation.resume(bytes)
+                } catch (failure: Exception) {
+                    if (continuation.isActive) continuation.resumeWithException(failure)
+                }
+            }
+        })
     }
 
     private suspend fun refreshLocked(lease: Lease): Lease {
@@ -174,6 +234,7 @@ class MemohApi(val client: OkHttpClient, val json: Json, private val tokenStore:
             "GET" -> builder.get().build()
             "POST" -> builder.post(body ?: ByteArray(0).toRequestBody(media)).build()
             "PATCH" -> builder.patch(body ?: ByteArray(0).toRequestBody(media)).build()
+            "DELETE" -> builder.delete(body).build()
             else -> error("Unsupported method")
         }
     }
@@ -214,6 +275,7 @@ class MemohApi(val client: OkHttpClient, val json: Json, private val tokenStore:
     }
 
     companion object {
+        const val MAX_IMAGE_BYTES = 24 * 1024 * 1024
         fun defaultClient() = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS)
             .followRedirects(false).followSslRedirects(false).build()

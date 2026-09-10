@@ -45,7 +45,9 @@ internal data class UiActions(
     val refreshModels: () -> Unit = {}, val selectModel: (String) -> Unit = {},
     val refreshDevices: () -> Unit = {}, val selectDevice: (String) -> Unit = {},
     val selectReasoning: (String) -> Unit = {},
+    val steer: () -> Unit = {}, val recoverSteering: (String) -> Unit = {}, val dismissSteering: (String) -> Unit = {},
     val answer: (String, List<UserAnswer>, Boolean) -> Unit = { _, _, _ -> },
+    val deleteSession: (Session) -> Unit = {},
 )
 
 @Composable fun MemohApp(app: AppState, startVisibleSend: (() -> Unit) -> Unit) {
@@ -56,7 +58,7 @@ internal data class UiActions(
         app::stop, app::decide, app::showBots, app::logout, app::clearError, app::openPending, app::resumePending, app::acknowledgeUnknown, app::forgetLogin,
         chooseFiles = { if (app.beginFileSelection()) runCatching { files.launch(arrayOf("*/*")) }.onFailure { app.filePickerUnavailable() } },
         removeAttachment = app::removeAttachment, retryAttachment = app::retryAttachment,
-        refreshModels = app::refreshModels, selectModel = app::selectModel, refreshDevices = app::refreshDevices, selectDevice = app::selectDevice, selectReasoning = app::selectReasoning, answer = app::answer))
+        refreshModels = app::refreshModels, selectModel = app::selectModel, refreshDevices = app::refreshDevices, selectDevice = app::selectDevice, selectReasoning = app::selectReasoning, answer = app::answer, steer = app::steer, recoverSteering = app::recoverSteering, dismissSteering = app::dismissSteering, deleteSession = app::deleteSession))
 }
 
 private class OpenChatDocuments : ActivityResultContracts.OpenMultipleDocuments() {
@@ -73,6 +75,8 @@ private class OpenChatDocuments : ActivityResultContracts.OpenMultipleDocuments(
     var create by rememberSaveable { mutableStateOf(false) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var logout by remember { mutableStateOf(false) }
+    var deleteCandidate by remember(state.bot?.id, state.user?.id) { mutableStateOf<Session?>(null) }
+    val requestDelete: (Session) -> Unit = { if (state.deletingSessionId == null && state.canDeleteSession(it)) deleteCandidate = it }
     val canCreate = state.settingsAvailable && state.bot?.currentUserPermissions.orEmpty().any { it.equals("chat", true) || it.equals("manage", true) }
     LaunchedEffect(state.screen, state.bot?.id, state.session?.id) { drawer.close(); create = false }
     CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
@@ -83,16 +87,16 @@ private class OpenChatDocuments : ActivityResultContracts.OpenMultipleDocuments(
         if (state.screen == Screen.Login) LoginScreen(state, actions.login, actions.forgetLogin)
         else {
             val nav: @Composable () -> Unit = {
-                WorkspaceNavigation(state, actions, { create = true; close() }, { settings = true; close() }, close)
+                WorkspaceNavigation(state, actions.copy(deleteSession = requestDelete), { create = true; close() }, { settings = true; close() }, close)
             }
             val main: @Composable () -> Unit = {
                 Column(Modifier.fillMaxSize().imePadding()) {
-                    MobileTopBar(state, sidebar, { scope.launch { drawer.open() } }, { create = true }, canCreate, { settings = true })
+                    MobileTopBar(state, sidebar, { scope.launch { drawer.open() } }, { create = true }, canCreate, { settings = true }, requestDelete)
                     if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
                     Box(Modifier.weight(1f)) {
                         when (state.screen) {
                             Screen.Bots -> BotScreen(state, actions.selectBot, actions.refreshBots)
-                            Screen.Sessions -> SessionHome(state, { create = true }, actions.openSession, canCreate)
+                            Screen.Sessions -> SessionHome(state, { create = true }, actions.openSession, canCreate, requestDelete)
                             Screen.Chat -> ChatScreen(state, actions)
                             else -> Unit
                         }
@@ -120,6 +124,12 @@ private class OpenChatDocuments : ActivityResultContracts.OpenMultipleDocuments(
     }
     }
     if (create && canCreate) CreateSessionDialog(state, { create = false }, actions.createSession)
+    deleteCandidate?.let { session ->
+        AlertDialog(onDismissRequest = { deleteCandidate = null }, title = { Text("删除会话？") },
+            text = { Text("删除「${session.title.ifBlank { "新会话" }}」后，会话及其聊天记录将从列表中移除，App 内无法恢复。正在执行的设备操作不一定会停止。") },
+            confirmButton = { TextButton({ deleteCandidate = null; actions.deleteSession(session) }, enabled = state.deletingSessionId == null) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton({ deleteCandidate = null }) { Text("取消") } })
+    }
     if (settings) AlertDialog(onDismissRequest = { settings = false }, icon = { MemohLogo(44.dp) }, title = { Text("Memoh") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(state.user?.displayName?.ifBlank { state.user.username } ?: "账户", style = MaterialTheme.typography.titleMedium)
@@ -131,7 +141,7 @@ private class OpenChatDocuments : ActivityResultContracts.OpenMultipleDocuments(
         confirmButton = { TextButton({ logout = false; actions.logout() }) { Text("退出登录") } }, dismissButton = { TextButton({ logout = false }) { Text("取消") } })
 }
 
-@Composable private fun MobileTopBar(state: UiState, sidebar: Boolean, openNav: () -> Unit, create: () -> Unit, canCreate: Boolean, settings: () -> Unit) {
+@Composable private fun MobileTopBar(state: UiState, sidebar: Boolean, openNav: () -> Unit, create: () -> Unit, canCreate: Boolean, settings: () -> Unit, delete: (Session) -> Unit) {
     Column(Modifier.background(MaterialTheme.colorScheme.surfaceContainerLow)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (!sidebar) QuietIconButton(Icons.Default.Menu, "打开导航", openNav) else Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) { MemohLogo(24.dp) }
@@ -143,6 +153,9 @@ private class OpenChatDocuments : ActivityResultContracts.OpenMultipleDocuments(
                     Text(when { state.session.isExternalChannel() -> "外部渠道 · 只读"; state.connected -> state.bot?.label().orEmpty(); state.connectionFailure != null -> "连接不可用"; else -> "正在连接…" },
                         style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+            }
+            state.session?.takeIf { state.canDeleteSession(it) }?.let { session ->
+                QuietIconButton(Icons.Default.DeleteOutline, "删除当前会话", { delete(session) }, state.deletingSessionId == null)
             }
             if (canCreate) QuietIconButton(Icons.Default.Add, "新建会话", create)
             else QuietIconButton(Icons.Default.Settings, "设置", settings)

@@ -19,9 +19,10 @@ class MemohApplication : Application() {
         val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = false }
         val tokens = TokenStore(this, json)
         val api = MemohApi(MemohApi.defaultClient(), json, tokens)
-        container = AppContainer(api, tokens, PendingOperationStore(this), EncryptedLoginStore(this), PreferencesModelSelectionStore(this))
+        container = AppContainer(api, tokens, PendingOperationStore(this), EncryptedLoginStore(this), PreferencesModelSelectionStore(this), icu.minq.memoh.security.EncryptedSteeringStore(this))
     }
 }
 
 data class AppContainer(val api: MemohApi, val tokenStore: AuthStore, val pendingStore: PendingOperationStore, val loginStore: LoginStore? = null,
-    val modelSelectionStore: ModelSelectionStore = MemoryModelSelectionStore())
+    val modelSelectionStore: ModelSelectionStore = MemoryModelSelectionStore(),
+    val steeringStore: icu.minq.memoh.data.SteeringStore = icu.minq.memoh.data.MemorySteeringStore())

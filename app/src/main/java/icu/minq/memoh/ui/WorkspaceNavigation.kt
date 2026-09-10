@@ -22,6 +22,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import icu.minq.memoh.data.Screen
 import icu.minq.memoh.data.UiState
+import icu.minq.memoh.data.canDeleteSession
 import icu.minq.memoh.model.*
 
 @Composable internal fun WorkspaceNavigation(state: UiState, actions: UiActions, create: () -> Unit, settings: () -> Unit, close: () -> Unit) {
@@ -74,6 +75,7 @@ import icu.minq.memoh.model.*
                         Row(Modifier.fillMaxWidth().clickable { if (session.id != state.session?.id) actions.openSession(session); close() }.padding(horizontal = 12.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Icon(if (session.isExternalChannel()) Icons.Default.Forum else Icons.Default.ChatBubbleOutline, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(session.title.ifBlank { "新会话" }, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (state.canDeleteSession(session)) QuietIconButton(Icons.Default.DeleteOutline, "删除会话 ${session.title.ifBlank { "新会话" }}", { actions.deleteSession(session) }, state.deletingSessionId == null)
                         }
                     }
                 }
@@ -132,7 +134,7 @@ import icu.minq.memoh.model.*
     }
 }
 
-@Composable internal fun SessionHome(state: UiState, create: () -> Unit, open: (Session) -> Unit, canCreate: Boolean) {
+@Composable internal fun SessionHome(state: UiState, create: () -> Unit, open: (Session) -> Unit, canCreate: Boolean, delete: (Session) -> Unit = {}) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         LazyColumn(Modifier.widthIn(max = 680.dp).fillMaxWidth(), contentPadding = PaddingValues(28.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             item {
@@ -155,6 +157,7 @@ import icu.minq.memoh.model.*
                         Icon(Icons.Default.ChatBubbleOutline, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(session.title.ifBlank { "新会话" }, Modifier.weight(1f), maxLines = 2, style = MaterialTheme.typography.bodyMedium, overflow = TextOverflow.Ellipsis)
                         Text(sessionDate(session.updatedAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (state.canDeleteSession(session)) QuietIconButton(Icons.Default.DeleteOutline, "删除会话 ${session.title.ifBlank { "新会话" }}", { delete(session) }, state.deletingSessionId == null)
                     }
                 }
             }

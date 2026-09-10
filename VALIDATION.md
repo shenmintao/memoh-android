@@ -1,113 +1,44 @@
-# v0.2.6 验证记录
+# Memoh Android v0.2.15 验证记录（2026-09-10）
 
-2026-09-05；工具详情每次只展开一个。
+- 原因：旧版 MessageAttachments 只绘制附件图标和名称，没有加载图片和点击预览。实际机器人回复的 PNG 使用 content_hash 和 bot_id；受保护媒体接口实测返回 HTTP 200 / image/png / 75,732 字节，与附件记录一致。验证未保存真实图片或聊天正文。
+- 新增图片媒体读取、登录刷新与权限错误处理、缩略图、全屏缩放和重试。解码在后台，最多 2 个并发、24 MB 下载和 24 MB 内存缓存，单张解码最多 400 万像素；无磁盘图片缓存。旧会话中的已有图片附件也使用此路径。
+- 12 项 API 36.1 设备回归通过：图片显示、点击预览、双击放大及还原、实际缩放像素、关闭、失败重试、Base64 字节完整和大图解码边界；以及 5 项长会话、4 项表格回归。
+- 已检查合成测试图片的缩略图和全屏截图。测试发现 Compose 1.7 全屏对话框会按含系统栏的屏幕高度测量，导致底部提示被裁切；改为按实际窗口测量后验证通过。截图和日志位于 `memoh-migration-backup/android-v0.2.15`。
+- 82 项 JVM 测试通过；Debug/Release Lint、R8 和发布构建通过。沿用原签名，在模拟器覆盖安装成功，冷启动 Status ok / 3,393 ms；核实 versionCode 19 / versionName 0.2.15。真机当前未连接。GIF 仅预览静态帧，SVG 和 Markdown 内远程图片暂不支持。
+- APK SHA-256：`ba191ac6905a8a2e23223995519c9f809e5ad35a20a32f10f4478fc3893b30e0`。证书 SHA-256：`d04126dd57f4764a295735b43120550f0d13651d439aacd2d2433b81060f047a`。
 
-- 工具详情不再各自保存展开布尔值，改为会话页面持有一个工具标识并下传到历史／实时消息；标识包含所属轮次，优先使用 tool_call_id，缺省时使用块编号。核对切换工具、再次点击收起和会话隔离的状态路径。
-- 沿用界面回归 `MobileShellTest` / `DecisionUiTest`，API 36.1 / Android 16 模拟器 12 项通过，0 失败／跳过；验证聊天、导航、选择器及批准／回答面板仍正常渲染和操作。
-- `testDebugUnitTest` 58 项通过；`lintDebug` / `lintRelease` 均 0 errors、30 warnings，沿用既有建议。本次没有新增测试用例或改动 API 协议。
-- Release 构建、R8／资源收缩及 v2 发布签名校验通过，沿用原证书；模拟器从 0.2.5 / 9 覆盖安装 0.2.6 / 10，冷启动 `Status: ok`。升级前已在登录页，不据此声称认证会话保留。
-- 回归使用本机模拟数据，未向真实 Agent 发送请求。本轮未重跑上一版的全部 33 项设备回归，历史记录保留如下。
+## v0.2.14（2026-09-10）
 
-# v0.2.5 验证记录（上一版）
+- 79 项 JVM 测试通过，包括 100 次流式增量合并后正文完整、最终状态及时发布、长内容跨页字符完整和消息块键稳定。
+- 18 项 API 36.1 设备测试通过：1,000 个工具步骤加 20 万字思考的懒加载；展开后分页；上翻阅读期间持续输出不移动原位置；连续新增段落后底部屏幕坐标保持在 1 像素误差内；90 行表格每次只创建 31 行（含表头），可切到最后一页；原有表格、补充与会话删除测试。
+- 对照恢复旧版 ChatScreen 执行同一大历史回归：旧版创建 200 个卡片，断言失败；修复版创建 14 个。没有进行真机帧率基准测试。
+- 已查看流式底部、表格分页和原有会话截图；单组件测试截图不包含正常应用外壳的系统栏留白。
+- 日志、旧版对照、截图和产物在 `memoh-migration-backup/android-v0.2.14`。
+- Debug/Release 构建、R8、Lint 和发布签名校验通过；使用原签名在模拟器覆盖安装并冷启动成功，核实 versionCode 18 / versionName 0.2.14。用户手机未连接，尚未在真机实际 DeepSeek 会话上验收流畅度。
 
-2026-09-05；批准、拒绝和交互回答，以及同一控制链路的状态恢复。
+## v0.2.13（2026-09-09）
 
-- Release 构建、R8／资源收缩、v2 发布签名校验通过，沿用原证书。模拟器从 0.2.4 / 8 覆盖安装 0.2.5 / 9，冷启动 `Status: ok`。升级前已在登录页，不据此声称认证会话保留。
-- `testDebugUnitTest` 最终 58 项通过；新增能力字段省略／显式 false、队列与历史合并、未知选项种类、单选／多选／自定义／必填／跳过校验、已确认结果隔离、已结束／不可操作通知过滤，以及旧快照不能恢复已结束任务的回归。
-- API 36.1 / Android 16 模拟器全套 33 项通过，0 失败／跳过。含既有登录、模型记忆、附件、通知和聊天回归；新增 4 项真实 TLS WebSocket + AppState 生命周期测试和 4 项 Compose 测试。初次新测试环境的地址构造线程与模拟服务端清理错误已修正，随后全套通过。
-- 生命周期回归检查：批准只发一次、精确 option_id、拒绝原因、失败可重试、重新打开待批准会话、非本会话／类型回执忽略、正常的 applied=false 无 code 不误报、已确认结果抵抗 pending 快照、用户回答／取消协议、断线不重放、运行态先于回执解决请求后释放下一项，以及控制错误不导致聊天假断线。
-- 最终界面与控制实现另在 320×600 dp 执行 8 项专项，全部通过；随后增加旧快照序号保护并通过最终单元测试。再显式打开系统软键盘，在 320×600 dp 实际窗口执行单选→自定义回答→滚动提交→取消专项 1 项通过，实际键盘截图为 `screenshots/narrow/user-input-ime.png`。键盘开启时表单可滚动到提交按钮，尺寸、密度和键盘设置已还原。
-- `lintDebug` / `lintRelease` 均 0 errors、30 warnings：28 条既有建议，新增 2 条测试依赖更新建议。未将测试用 TLS 证书或服务端带入 Release。
-- 对照本地官方 Memoh `67fe0e6` 的 `usePendingApprovals.ts`、`tool-approval-actions.vue`、`chat-user-input-form.vue`、`decisions.ts`、`useChat.types.ts`、`local_channel.go` 和 userinput 校验协议。只处理当前活动 turn 的待决定请求；服务器仍校验实际权限和有效性。
-- 测试均使用本机模拟 REST／TLS WebSocket，未批准用户真实 Agent 的工具执行，未发送真实任务。不声称用户未提供的服务器日志／机型已经实测。回答草稿及拒绝原因不写入磁盘，离开会话或结束进程后需重新填写；已结束、过期或明确不可操作的请求只能查看。
+- 原因：旧聊天渲染器仅使用 Markwon core，未启用 GFM 表格解析。新版按完整 CommonMark 文档解析，以原生 TableLayout 展示单元格，并用 Compose 提供局部横向滚动；列表、引用、代码块和引用式链接保持文档语义。
+- 76 项 JVM 单元测试通过；Debug/Release 构建、R8 和 Lint 检查通过（0 errors，现有及方向对齐等建议性 warnings）。
+- API 36.1 上 4 项 MarkdownTableTest 全部通过：320 dp 下长中文自动换行且无裁切；同一行单元格等高；宽表格滑到最后一列且新行生成后保持位置；表头流式成型；列表／引用内表格；转义管道、空单元格、加粗、代码、换行、引用式链接及非 HTTP(S) 链接不可点击。
+- 已查看浅色、深色、横向滑动后和嵌套表格截图，位于发布目录 android-v0.2.13/screenshots。截图来自应用 Compose 表面。首次设备启动因模拟器资源紧张失败；关闭构建守护进程，并以 4 核／3 GB 内存重新冷启动模拟器后，设备测试用时 7.657 秒且全部通过。
+- 解析测试也发现引用链接定义会产生空白正文区块，已过滤空渲染结果，避免表格后多余留白。签名沿用既有发布证书。
 
-# v0.2.4 验证记录（上一版）
+## v0.2.11 验证记录（2026-09-08）
 
-2026-09-05；模型与思考强度跨应用进程保存。
+- 图片：检查确认线上近期上传的 JPEG 已成功持久化；原模型配置全部缺少 vision，原生运行时把图片降级为文件引用。用不含用户内容的红蓝色块 PNG 调用现有模型服务，14 个模型返回正确的上下颜色。已为这 14 个模型增加 vision，保留其余配置。gpt-5.4 与 gpt-5.4-mini 的上游返回 model_not_found，未修改。
+- 配置备份位于 /root/migration-backups/vision-20260908/verified-model-config-before.jsonl；验证明细见 vision-probe-final.log、vision-probe-more.log、vision-deployment.log。探测首次使用 Python 默认 User-Agent 被上游 HTTP 403 拦截；改用 Memoh Go 客户端的 User-Agent 后验证成功。
+- Go 完整测试：144 个包通过；全量 golangci-lint 通过。session、view、message、application 四组 race 测试通过。插入位置在队列消费时记录，不会被后续输出或终态快照改变。
+- SQL 由 sqlc 1.31.1 重新生成，历史查询读取现有 run_id 列，无数据库结构迁移。Swagger 及 SDK 已生成，SDK TypeScript 检查通过。
+- 安卓：76 个 JVM 单元测试通过。覆盖多条同批插入、待处理/拒绝/未知状态不冒充已插入、背景回执、旧回执防降级、同一任务跨轮次历史合并、批量与重复文本的本地记录清理。
+- 初轮 22 项 Android API 36.1 设备测试通过：SteeringUiTest、SteeringLifecycleTest、AttachmentReaderTest、ComposerLifecycleTest。最终补充运行图片从系统 URI 到 WebSocket 的完整字节检查及更新后的聊天 UI 测试。
+- 服务端已于 2026-09-08 04:00:35 UTC 部署到 memoh.minq.icu。部署前确认无活动任务，只重建 server。镜像 memohai/server:0.19.0-remote-acp-supplement1，Docker healthy，公网 /health 返回 ok。
+- 服务器二进制 SHA256 a296efc964dcdc4ba46b582db4318624d4e1f889984005bedf7f71f2ba9130bb。桥接程序 SHA256 保持 7cc989d25cc01406085bb314e621051b022bf5c797e4f9bef45de0bea64e949b。回滚 Compose 位于 /root/migration-backups/supplement-20260908T040035Z/docker-compose.yml。
 
-- Release 构建、R8／资源收缩和 v2 发布签名校验通过，沿用原证书。模拟器从 0.2.3 / 7 直接覆盖安装 0.2.4 / 8，冷启动返回 `Status: ok`。升级前已在登录页，不据此声称认证会话保留。
-- `lintDebug` / `lintRelease` 均为 0 errors、28 warnings：27 条既有建议，加 1 条 SharedPreferences KTX 建议。本次保留 `commit()` 的布尔返回值，以在写盘失败时提示，且确保选择确认前已完成持久化。
-- 单元回归 50 项、API 36.1 / Android 16 模拟器全套 25 项通过，0 失败／跳过。新增 4 项生命周期回归，覆盖持久化恢复、账号／服务器／会话隔离、退出登录保留、跟随默认、模型下架回退、写入失败，以及直接 Agent 和 ACP 运行时重建后的恢复。
-- 最终 ACP 恢复逻辑另执行 2 项专项通过。模拟服务端重置为默认模型后，客户端恢复已选模型及强度；PATCH 失败不假报成功，刷新重试待服务端确认后恢复可用。
-- 另手动安装隔离的 Debug 和 instrumentation APK，分两次 `am instrument` 执行保存／读取：第一次通过实际 AppState 选择模型二和高强度，随后 `am force-stop` 并确认旧进程已不存在；新进程打开同一会话及刷新后仍恢复两项。两个阶段各 1 项通过，不依赖 SavedStateHandle 或内存容器。
-- 本轮使用本机模拟 API，没有向真实 Agent 发送测试任务。升级后需要重新选择一次模型；旧版本已丢失的内存选择无法恢复。偏好只保存在当前安装的本机数据中，不跨设备同步。
+队列提示在模型确认消费后自动消失；补充内容保留在主对话。未确认或拒绝的内容仍可取回，客户端不会在重连时自动重发。完成后只有历史包含对应消息，才清理加密保存的已插入记录。
 
-# v0.2.3 验证记录（上一版）
+最终 5 项设备测试全部通过（4 项 UI、1 项真实图片 URI 到 WebSocket 字节检查），合计覆盖 23 个不同设备用例。已查看自动化生成的运行中与完成后的截图，补充内容均在主对话中，队列提示消失。这里的截图检查由编码代理完成，尚无用户端人工确认。
 
-2026-09-05；通知只保留左侧身份图标，顶部状态栏使用 Memoh 轮廓。
+Release 构建、Debug/Release lint、R8 及原签名验证通过。证书 SHA256 d04126dd57f4764a295735b43120550f0d13651d439aacd2d2433b81060f047a。APK SHA256 f24f239831706c2b69ca2739c6dca3002299f7c6980de9598a8dbc800f2ed51f。
 
-- Release 构建、R8／资源收缩和发布签名校验通过，沿用旧证书；模拟器从 0.2.2 / 6 覆盖安装 0.2.3 / 7，并对最终 APK 再次覆盖安装及冷启动成功。Lint Debug／Release 均 0 errors、27 warnings（22 条既有建议及 5 条兼容 PNG 图标外形建议）。
-- 单元回归 50 项通过；本轮按通知范围执行设备专项，上一版 21 项全套回归保留在历史记录。
-
-- 通知专项 `PendingServiceTest`：API 36.1 / Android 16 模拟器 2 项通过，0 失败／跳过。实际 NotificationManager 收到的等待、失败结果、超时结果和锁屏 publicVersion 均不含 largeIcon，smallIcon 指向新的 `ic_stat_memoh`，通知色为品牌紫色；通用文案、隐私可见性、过期监听与旧启动回归通过。
-- 状态栏图标 alpha 轮廓与官方彩色 Memoh 矢量逐像素比较，差异低于 1%；系统 PackageManager 返回的应用图标保留官方两种紫色。五档密度 PNG 从现有官方矢量生成，作为非自适应图标读取方式的兼容资源。
-- 核对实际通知中心截图：左侧显示彩色 Memoh 应用图标，右侧无第二个 logo。等待通知为低重要性，模拟器在该配置下不在顶部显示静默通知图标；不把图标资源核对表述为强制覆盖系统的静默图标设置。
-- 本次测试使用本机模拟 API，不向真实 Agent 发送请求。截图中的错误状态为测试样例。用户尚未提供真机品牌／系统版本，未声称已在其系统上完成实机验证；图标缓存是否刷新需要在该设备覆盖升级后观察。
-- 系统模板依据：[Android 通知设计](https://developer.android.com/design/ui/mobile/guides/home-screen/notifications)（状态栏单色图标、可选 large icon、厂商模板差异）；[小米通知 SDK 文档](https://dev.mi.com/xiaomihyperos/documentation/detail?pId=1544)与[华为通知设计](https://developer.huawei.com/consumer/cn/doc/doccenter-ux-design/system-features-notification-0000001793074217)说明系统可从应用图标取得通知身份标识。未加入厂商私有反射接口。
-
-# v0.2.2 验证记录（上一版）
-
-2026-09-05；模型浮层、UUID 隐藏和实际思考强度参数。
-
-- `lintDebug` / `lintRelease`：各 0 errors、22 warnings，沿用依赖／target API／KTX 建议。Release R8 与资源收缩、v2 签名校验通过，沿用原 RSA 4096 发布证书。
-- API 36.1 模拟器从已安装的 0.2.1 / 5 直接覆盖安装 0.2.2 / 6 成功，冷启动 `Status: ok`。升级前已在登录页，本轮未据此宣称现有认证会话保留，登录表单可见字段前后相同。
-
-- `testDebugUnitTest`：50 项通过。新增原生／直接 Agent／ACP 能力与默认值校正、UUID 文案回退；扩展官方 REST 响应解析与 reasoning PATCH 合约，以及实际 TLS WebSocket 的 reasoning_effort 请求参数。
-- `connectedDebugAndroidTest`：API 36.1 / Android 16 模拟器最终全套 21 项通过，0 失败／跳过。包含 ACP 思考强度未确认时保留原值并阻止发送、刷新恢复、确认成功；强度按会话恢复且不泄漏到其他会话；既有附件、通知、登录和聊天回归。
-- Compose 新增供应商分组、模型 UUID 不展示、强度勾选与按钮同步、不支持思考时隐藏入口、搜索无结果／清空恢复，以及旧设备／模型选择回归。
-- 最终布局另在 320×600 dp 窄屏执行模型与设备 2 项专项回归，以及 960×800 dp 宽屏执行模型浮层 1 项专项回归，均通过。核对手机、窄屏、宽屏实际窗口截图，含搜索键盘：浮层收缩列表以保留按钮，宽屏右侧子菜单，手机同一浮层内返回。
-- 源码依据本地官方 Memoh `67fe0e6`：`model-options.vue`、`reasoning-effort.ts`、`useAgentModelCatalog.ts`、`chat-pane.vue`、SDK 类型及 ACP Go handler。仅展示服务端支持的档位；供应商读取失败不阻断模型使用。
-- 本轮请求验证使用模拟 REST / TLS WebSocket，未向用户真实 Agent 发送测试任务。截图模型与会话为测试数据。具体部署提供的档位取决于服务器能力。
-
-# v0.2.1 验证记录（上一版）
-
-2026-09-05；客户端更新，通知 logo、聊天附件上传、设备与模型选择。
-
-## 自动回归
-
-- `testDebugUnitTest`：46 项通过。新增官方模型／设备／ACP REST 合约、实际 TLS WebSocket 携带文件 data URL / MIME / 文件名 / model_id / workspace_target_id、仅发送附件和断线不重放、附件内存上限与会话隔离、设备在线／目录绑定规则、附件历史解析。
-- `connectedDebugAndroidTest`：API 36.1 手机模拟器，19 项全部通过。新增真实 ContentResolver 二进制／空文件读取、超限拒绝、已删除文件读取失败；系统 OpenDocument 多选 Intent 及真实 MainActivity 返回回调；附件与模型／设备按会话恢复、迟到文件选择隔离；ACP 切换失败不假报成功、刷新和成功切换。
-- Compose 回归验证附件卡片、移除／读取失败重试、无文字发送、模型搜索／选中、设备选择／离线不可选，以及既有登录记住、聊天空 error、导航和深色主题。
-- 通知服务回归检查系统实际收到的等待／结果／锁屏通用通知，包含官方两种紫色的 large icon，仍保留单色 small icon、通用错误文案和可见性。通知栏截图使用模拟失败事件，截图中的错误提醒是测试样例。
-- 320×600 dp 窄屏：附件与选择器 2 项回归通过；发现键盘遮挡弹窗按钮后，显式应用 IME insets、列表按剩余高度滚动、选中后关闭键盘，最终模型／设备选择器专项复测 1 项通过，并核对截图中搜索时“刷新／完成”可见。相关截图为 `screenshots/ime-final/`。
-- `lintDebug` / `lintRelease`：各 0 errors、22 warnings（沿用依赖／target API／KTX 建议及测试 SDK 版本条件建议）。
-- 最终 R8 / 资源收缩 / Release 构建与签名验证通过，包名 `icu.minq.memoh`、versionCode 5，沿用旧发布证书。在 API36.1 模拟器上从 0.2.0 / 4 直接 `adb install -r` 升级至 0.2.1 / 5，冷启动返回 `Status: ok`。
-
-## 范围
-
-- 接口依据本地官方 Memoh `67fe0e6` 的 `useComposerAttachments.ts`、`useChat.ws.ts`、`useAgentModelCatalog.ts`、`chat-pane.vue`、`workspace-target.ts` 和 SDK / Go handlers 核对。
-- 文件作为聊天附件随消息提交，无独立 HTTP 上传进度百分比；客户端显示读取、就绪、读取失败、提交和等待回复状态。最多 10 个文件、合计 8 MB；附件及选择仅在进程内保存。
-- 已绑定工作目录的会话不覆盖 `workspace_target_id`，Agent 会话由 Agent 配置决定设备。列表依赖服务器 API 与账户权限，无法读取时明确提示并提供刷新。
-- 本轮没有向用户真实 Agent 发送测试任务。网络与选择回归使用模拟 API / TLS WebSocket；不把这些结果表述为所有部署、模型文件理解能力或厂商后台策略均已验证。
-- 文件管理器、文件夹上传、附件下载／图片预览、交互式 user-input、历史分页和多并发 pending 未包含在本轮。
-
-# v0.2.0 验证记录（上一版）
-
-2026-09-05；本次修改原生 Android 客户端，没有更新 Memoh 服务端。
-
-## 结果
-
-- `testDebugUnitTest`：41 项，0 失败、0 错误。包含成功终态 delta 携带空 error、error 缺省/null/空白、真实 errored/lost，以及原有认证、WebSocket 生命周期、pending、草稿和历史合并测试。
-- `connectedDebugAndroidTest`：API 36.1 手机模拟器，13 项全部通过。新增 Compose 真实界面测试验证成功回复不出现错误、下一条发送、真实错误显示、导航搜索切换、登录表单恢复和取消记住、深色阅读布局。
-- 加密存储设备回归验证：三个字段能通过新存储实例恢复、SharedPreferences 没有明文、重复加密使用不同 nonce、损坏密文清除、主动忘记后无法恢复。登录流程回归验证：只有成功登录保存、登出恢复表单、错误密码不覆盖原记录、不勾选不保存。
-- 会话刷新设备回归验证：在 Chat 中刷新保持页面、会话和草稿；返回能取消迟到加载。
-- 960×800 dp 平板模拟尺寸：5 项界面测试通过。
-- 960×360 dp、150% 字体模拟尺寸：登录按钮可滚动访问，导航可滚动搜索并选择会话，2 项测试通过。
-- `lintDebug` / `lintRelease`：0 errors，各 21 warnings（依赖更新、旧 target API、KTX 和 v26 资源目录建议）。
-- R8 Release 构建、资源收缩与 APK 签名验证通过；RSA4096、v2、单一签名，证书与 v0.1.2 相同。
-
-## 正式包升级
-
-- 在原来安装 0.1.2 / versionCode 3 的模拟器上 `adb install -r` 覆盖到 0.2.0 / 4，没有卸载正式应用。
-- 冷启动成功，旧登录状态保留并进入机器人页面，未发现正式应用的 crash 日志。
-- 实际 Debug 主 Activity 打开软键盘，系统 `mInputShown=true`、`mIsInputViewShown=true`，登录表单和继续按钮可访问；截图为 `screenshots/login-ime-actual.png`。
-- 另在开启模拟器软键盘显示后复测聊天输入/发送回调，1 项通过。
-- 尺寸、密度、字体和硬件键盘对应的软键盘显示设置已还原。
-
-## 范围
-
-- 截图中的用户名、服务器域名和聊天内容均为测试样例，不是用户真实聊天。Compose 截图中的 keyboard 名称表示输入聚焦步骤；系统键盘的直接图像证据是 `login-ime-actual.png`。
-- API 合约及真实服务器的读取/原账户恢复沿用原客户端。本次没有向真实 Agent 额外发送任务，不把 UI fixture 测试视为真实后台/服务端回复全链路验证。
-- 没有覆盖 API26–35 真机、厂商省电策略或全部多窗口组合；低高度窗口由 `wm size/density` 模拟。
-- 界面按官方 mobile shell 与登录页在 Compose 中重写，使用官方 SVG 路径和设计 token；未内嵌 Vue/WebView。文件、终端、浏览器、定时任务等网页管理面板不在本客户端已有功能范围内。附件、交互式 user-input、历史分页和多并发 pending 的限制继续保留。
-- 不预置部署 URL、用户名或密码；记住功能为显式勾选，密码以 AndroidKeyStore AES/GCM 加密存储，未进入 SavedState、日志、通知或交付源码。
+已在 API 36.1 模拟器上使用 adb install -r 覆盖安装，保留数据；冷启动 Status ok / TotalTime 3506 ms，确认 versionName 0.2.11、versionCode 15。

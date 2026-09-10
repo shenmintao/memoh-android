@@ -30,6 +30,7 @@ data class UiState(
     val bot: Bot? = null,
     val sessions: List<Session> = emptyList(),
     val session: Session? = null,
+    val deletingSessionId: String? = null,
     val workdirs: List<Workdir> = emptyList(),
     val settings: BotSettings = BotSettings(),
     val settingsAvailable: Boolean = false,
@@ -42,6 +43,8 @@ data class UiState(
     val pendingControls: Set<String> = emptySet(),
     val resolvedDecisions: Set<String> = emptySet(),
     val draft: String = "",
+    val steering: StoredSteering? = null,
+    val steeringQueue: List<StoredSteering> = emptyList(),
     val sendInFlight: Boolean = false,
     val rememberedLogin: RememberedLogin? = null,
     val attachments: List<DraftAttachment> = emptyList(),
@@ -77,8 +80,14 @@ class AppState(application: Application, private val container: AppContainer, pr
     private var modelVersion = 0L
     private var targetVersion = 0L
     private var accountKey = ""
+    private val deletedSessionIds = mutableSetOf<String>()
 
     init {
+        viewModelScope.launch {
+            container.steeringStore.changes.collect {
+                refreshSteeringView()
+            }
+        }
         viewModelScope.launch {
             container.pendingStore.changes.collect { pending ->
                 mutable.value = mutable.value.copy(pending = pending)
@@ -172,6 +181,16 @@ class AppState(application: Application, private val container: AppContainer, pr
         recoveryJob = viewModelScope.launch { delay(10_000); monitor.close(); if (recoverySocket === monitor) recoverySocket = null }
     }
 
+    /** A foreground return replaces any half-open subscription, never a running task. */
+    fun onForeground() {
+        val value = mutable.value
+        if (value.screen != Screen.Chat || chatSocket == null) return
+        mutable.value = value.copy(connected = false, connectionFailure = null,
+            runtime = value.runtime.copy(needsSnapshot = true))
+        refreshSteeringView()
+        chatSocket?.resync()
+    }
+
     fun openPending() {
         container.pendingStore.read()?.takeIf { it.accountKey == accountKey }?.let { bootstrap(it.botId, it.sessionId) }
     }
@@ -219,16 +238,54 @@ class AppState(application: Application, private val container: AppContainer, pr
         openSessionNow(bot, session, generation, auth)
     }
 
+    fun deleteSession(session: Session) {
+        val value = mutable.value
+        val bot = value.bot ?: return
+        if (value.deletingSessionId != null || !value.canDeleteSession(session)) return
+        val auth = authGeneration
+        val key = draftKey(bot.id, session.id)
+        mutable.value = value.copy(deletingSessionId = session.id, error = null)
+        viewModelScope.launch {
+            try {
+                container.api.deleteSession(bot.id, session.id)
+                if (auth != authGeneration) return@launch
+                deletedSessionIds.add(session.id)
+                // Navigation can change while DELETE is in flight. Only close the deleted chat.
+                if (mutable.value.bot?.id == bot.id && mutable.value.session?.id == session.id) back()
+                drafts.put(key, "")
+                attachments.get(key).forEach { attachmentJobs.remove(it.id)?.cancel(); attachments.remove(key, it.id) }
+                if (pickerContext?.key == key) pickerContext = null
+                targetSelections.remove(key)
+                runCatching { container.steeringStore.writeQueue(key, emptyList()) }
+                container.pendingStore.read()?.takeIf { it.accountKey == accountKey && it.botId == bot.id && it.sessionId == session.id }?.let {
+                    recoveryJob?.cancel(); recoverySocket?.close(); recoverySocket = null
+                    if (container.pendingStore.clearIfMatches(it))
+                        getApplication<Application>().stopService(android.content.Intent(getApplication(), PendingReplyService::class.java))
+                }
+                if (mutable.value.bot?.id == bot.id)
+                    mutable.value = mutable.value.copy(sessions = mutable.value.sessions.filterNot { it.id == session.id })
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                if (auth == authGeneration) mutable.value = mutable.value.copy(error = "删除会话失败：${failure.message ?: "请稍后重试"}")
+            } finally {
+                if (auth == authGeneration) mutable.value = mutable.value.copy(deletingSessionId = null)
+            }
+        }
+    }
+
     private suspend fun openSessionNow(bot: Bot, session: Session, generation: Long, auth: Long) {
         val history = container.api.history(bot.id, session.id)
         if (!isCurrent(generation, auth)) return
+        if (session.id in deletedSessionIds) throw IllegalStateException("此会话已删除")
         chatSocket?.close()
         historyJob?.cancel(); terminalReconciliationKey = null
         controls.clear(); confirmedDecisions.clear()
         val remembered = container.modelSelectionStore.read(modelSelectionKey(bot, session))
         acpSelectionToRestore = remembered.takeIf { session.runtimeType == "acp_agent" || session.type == "acp_agent" }
+        val restoredSteering = container.steeringStore.readQueue(draftKey(bot.id,session.id)).map { if (it.inFlight) it.copy(status="unknown") else it }
         mutable.value = mutable.value.copy(screen = Screen.Chat, session = session, history = history,
             runtime = RuntimeState(sessionId = session.id), connected = false, connectionFailure = null,
+            steering = restoredSteering.lastOrNull(), steeringQueue = restoredSteering,
             pendingControls = emptySet(), resolvedDecisions = emptySet(), draft = drafts.get(draftKey(bot.id, session.id)),
             attachments = attachments.get(draftKey(bot.id, session.id)), composer = ComposerConfig(
                 modelId = remembered?.modelId ?: if (session.type == "subagent") session.metadataString("model_uuid") else "",
@@ -254,6 +311,9 @@ class AppState(application: Application, private val container: AppContainer, pr
                 }
                 val projected = confirmedDecisions.values.fold(state.run) { run, receipt -> receipt.apply(run) }
                 mutable.value = mutable.value.copy(runtime = state.copy(run = projected), pendingControls = controls.keys.toSet(), resolvedDecisions = confirmedDecisions.keys.toSet())
+                runCatching { container.steeringStore.observe(draftKey(bot.id, session.id), state.run) }
+                    .onFailure { mutable.value = mutable.value.copy(error="无法保存补充状态，请稍后重新核对") }
+                refreshSteeringView()
                 container.pendingStore.observe(accountKey, bot.id, session.id, state.run)
                 if (!state.run.isTerminal()) {
                     terminalReconciliationKey = null; historyJob?.cancel()
@@ -284,6 +344,24 @@ class AppState(application: Application, private val container: AppContainer, pr
             }
             override fun onControl(controlId: String, applied: Boolean, code: String?) {
                 if (!active()) return
+                val supplement = container.steeringStore.readQueue(draftKey(bot.id,session.id)).firstOrNull { it.id == controlId }
+                if (supplement != null) {
+                    val authoritative = mutable.value.runtime.run?.let { run -> run.steer_queue.firstOrNull { it.id == controlId } ?: run.steer?.takeIf { it.id == controlId } }
+                    if (authoritative?.id == controlId && authoritative.status in setOf("applied", "rejected")) {
+                        updateSteering(supplement.observe(mutable.value.runtime.run))
+                        return
+                    }
+                    if (supplement.status !in setOf("applied", "rejected")) {
+                        val status = when {
+                            applied -> "queued"
+                            code in setOf("steer_rejected", "steer_forbidden", "steer_unsupported") -> "rejected"
+                            else -> "unknown"
+                        }
+                        updateSteering(supplement.copy(status = status))
+                    }
+                    candidate.refreshRuntime()
+                    return
+                }
                 val control = controls.remove(controlId) ?: return
                 mutable.value = mutable.value.copy(pendingControls = controls.keys.toSet())
                 if (applied || code.isNullOrBlank()) {
@@ -299,7 +377,10 @@ class AppState(application: Application, private val container: AppContainer, pr
                 }
             }
             override fun onConnection(connected: Boolean) {
-                if (active()) mutable.value = mutable.value.copy(connected = connected, connectionFailure = if (connected) null else mutable.value.connectionFailure)
+                if (active()) {
+                    mutable.value = mutable.value.copy(connected = connected, connectionFailure = if (connected) null else mutable.value.connectionFailure)
+                    refreshSteeringView()
+                }
             }
         })
         chatSocket = candidate
@@ -579,6 +660,90 @@ class AppState(application: Application, private val container: AppContainer, pr
         mutable.value = value.copy(draft = bounded)
     }
 
+    private fun refreshSteeringView() {
+        val value = mutable.value
+        if (value.screen != Screen.Chat) return
+        val key = visibleDraftKey() ?: return
+        val saved = container.steeringStore.readQueue(key)
+        val confirmed = confirmedSupplementIds(value.history, saved)
+        val retained = saved.filterNot { it.id in confirmed }
+        if (retained != saved) runCatching {
+            synchronized(container.steeringStore) {
+                container.steeringStore.writeQueue(key, container.steeringStore.readQueue(key).filterNot { it.id in confirmed })
+            }
+        }
+        val records = retained.map {
+            if (it.inFlight && (!value.connected || value.runtime.needsSnapshot)) it.copy(status="unknown") else it
+        }
+        mutable.value = value.copy(steering = records.lastOrNull(), steeringQueue = records)
+    }
+
+    private fun updateSteering(value: StoredSteering): Boolean = try {
+        val key = visibleDraftKey() ?: return false
+        synchronized(container.steeringStore) {
+            val records = container.steeringStore.readQueue(key)
+            val previous = records.firstOrNull { it.id == value.id && it.runId == value.runId }
+            val next = if (previous?.settled == true) previous else value
+            val updated = if (previous == null) records + next else records.map { if (it.id == value.id) next else it }
+            if (records != updated) container.steeringStore.writeQueue(key,updated)
+        }
+        refreshSteeringView()
+        true
+    } catch (_: Exception) {
+        mutable.value = mutable.value.copy(error = "无法保存补充内容，请保留输入后重试")
+        false
+    }
+
+    fun steer() {
+        val value = mutable.value
+        val run = value.runtime.run ?: return
+        val socket = chatSocket ?: return
+        if (!value.runtime.steerSupported || value.session.isExternalChannel() || run.status != "running" || value.runtime.needsSnapshot ||
+            !value.connected || !socket.isUsable() || value.draft.isBlank()) return
+        val records = container.steeringStore.readQueue(visibleDraftKey() ?: return)
+        if (!value.runtime.steerQueueSupported && (records.any { it.inFlight } || run.steer?.status in setOf("pending", "queued"))) return
+        val pendingRecords = records.filter { it.runId == run.run_id && it.inFlight }
+        if (pendingRecords.size >= 32 || records.size >= 128 || pendingRecords.sumOf { it.text.length + 2 } + value.draft.trim().length > 32000) {
+            mutable.value = value.copy(error="补充队列已满（最多 32 条、合计 32000 字符），请等待插入或清理已结束的记录")
+            return
+        }
+        if (value.attachments.isNotEmpty()) {
+            mutable.value = value.copy(error = "运行中补充暂时支持文字，请在下一条消息发送附件")
+            return
+        }
+        if (value.draft.trim().length > 32000) {
+            mutable.value = value.copy(error = "补充内容最多 32000 字符，请缩短后提交")
+            return
+        }
+        val text = value.draft.trim()
+        val pending = StoredSteering(UUID.randomUUID().toString(), run.run_id, text, turnId = run.turn_id, afterMessageId = run.messages.maxOfOrNull { it.id } ?: -1)
+        if (!updateSteering(pending)) return
+        // Persist before touching the transport; an uncertain delivery is never replayed.
+        if (socket.steer(run.run_id, pending.id, text, run.steer?.id.orEmpty(), queue = value.runtime.steerQueueSupported) == null) {
+            updateSteering(pending.copy(status = "rejected"))
+            return
+        }
+        editDraft("")
+    }
+
+    fun recoverSteering(id: String = mutable.value.steering?.id.orEmpty()) {
+        val current = mutable.value
+        val text = current.supplements().firstOrNull { it.id == id }?.text ?: return
+        editDraft(if (current.draft.isBlank()) text else current.draft + "\n" + text)
+    }
+
+    fun dismissSteering(id: String = mutable.value.steering?.id.orEmpty()) {
+        val value = mutable.value
+        val supplement = value.supplements().firstOrNull { it.id == id } ?: return
+        val sameActiveRun = value.runtime.run?.run_id == supplement.runId && value.runtime.run?.isTerminal() == false
+        if (supplement.inFlight && (value.runtime.needsSnapshot || sameActiveRun)) return
+        runCatching {
+            val key = visibleDraftKey() ?: return
+            synchronized(container.steeringStore) { container.steeringStore.writeQueue(key, container.steeringStore.readQueue(key).filterNot { it.id == id }) }
+            refreshSteeringView()
+        }.onFailure { mutable.value = mutable.value.copy(error="无法移除补充记录") }
+    }
+
     fun send(text: String) {
         val value = mutable.value
         val bot = value.bot ?: return
@@ -680,7 +845,7 @@ class AppState(application: Application, private val container: AppContainer, pr
                 chatSocket?.close(); chatSocket = null
                 savedState[KEY_SESSION] = ""
                 controls.clear(); confirmedDecisions.clear()
-                mutable.value = mutable.value.copy(screen = Screen.Sessions, session = null, history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null, pendingControls = emptySet(), resolvedDecisions = emptySet(), draft = "", attachments = emptyList(), composer = ComposerConfig())
+                mutable.value = mutable.value.copy(screen = Screen.Sessions, session = null, history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null, pendingControls = emptySet(), resolvedDecisions = emptySet(), steering = null, steeringQueue = emptyList(), draft = "", attachments = emptyList(), composer = ComposerConfig())
             }
             Screen.Sessions -> {
                 savedState[KEY_BOT] = ""; savedState[KEY_SESSION] = ""
@@ -704,6 +869,7 @@ class AppState(application: Application, private val container: AppContainer, pr
         getApplication<Application>().stopService(android.content.Intent(getApplication(), PendingReplyService::class.java))
         container.pendingStore.clear()
         drafts.clear(); controls.clear(); confirmedDecisions.clear(); accountKey = ""
+        deletedSessionIds.clear()
         modelsJob?.cancel(); targetsJob?.cancel(); modelVersion++; targetVersion++
         attachmentJobs.values.toList().forEach { it.cancel() }; attachmentJobs.clear(); attachments.clear(); pickerContext = null
         acpSelectionToRestore = null; targetSelections.clear()
@@ -723,7 +889,7 @@ class AppState(application: Application, private val container: AppContainer, pr
         val sessions = container.api.sessions(bot.id)
         val settings = optionalResource(bot.hasPermission("chat"), BotSettings()) { container.api.settings(bot.id) }
         val workdirs = optionalResource(bot.hasPermission("workspace_read"), emptyList()) { container.api.workdirs(bot.id) }
-        return BotResources(sessions, settings.first, settings.second, workdirs.first, workdirs.second)
+        return BotResources(sessions.filterNot { it.id in deletedSessionIds }, settings.first, settings.second, workdirs.first, workdirs.second)
     }
     private suspend fun <T> optionalResource(allowed: Boolean, fallback: T, load: suspend () -> T): Pair<T, Boolean> {
         if (!allowed) return fallback to false
@@ -738,7 +904,7 @@ class AppState(application: Application, private val container: AppContainer, pr
             settingsAvailable = resources.settingsAvailable, workdirs = resources.workdirs,
             workdirsAvailable = resources.workdirsAvailable, sessions = resources.sessions, session = null,
             history = emptyList(), runtime = RuntimeState(), connected = false, connectionFailure = null,
-            pendingControls = emptySet(), resolvedDecisions = emptySet(), draft = "", attachments = emptyList(), composer = ComposerConfig())
+            pendingControls = emptySet(), resolvedDecisions = emptySet(), steering = null, steeringQueue = emptyList(), draft = "", attachments = emptyList(), composer = ComposerConfig())
     }
     private fun refreshHistoryAfterTerminal(botId: String, sessionId: String, auth: Long, key: String) = viewModelScope.launch {
         try {
@@ -747,6 +913,7 @@ class AppState(application: Application, private val container: AppContainer, pr
             if (auth == authGeneration && current.session?.id == sessionId && terminalReconciliationKey == key && runtimeIdentity(current.runtime) == key) {
                 // Keep the terminal projection until matching history exists. Never overwrite a newer run.
                 mutable.value = current.copy(history = history)
+                refreshSteeringView()
             }
         } catch (_: CancellationException) { throw CancellationException() }
         catch (_: Exception) { /* The authoritative runtime remains visible; reopening reloads history. */ }
@@ -778,3 +945,12 @@ class AppState(application: Application, private val container: AppContainer, pr
 }
 
 internal fun runtimeIdentity(state: RuntimeState) = listOf(state.sessionId, state.epoch, state.seq.toString(), state.run?.run_id.orEmpty(), state.run?.status.orEmpty()).joinToString(":")
+
+fun UiState.supplements(): List<StoredSteering> = steeringQueue.ifEmpty { listOfNotNull(steering) }
+
+fun UiState.canDeleteSession(session: Session): Boolean {
+    val selectedBot = bot ?: return false
+    if (selectedBot.id != session.botId) return false
+    val permission = if (session.runtimeType == "acp_agent" || session.type == "acp_agent") "workspace_exec" else "chat"
+    return selectedBot.currentUserPermissions.any { it.equals("manage", true) || it.equals(permission, true) }
+}
